@@ -272,6 +272,27 @@ function couponText(v) {
   return text;
 }
 
+function directField(obj, names) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const wanted = new Set(names.map(keyName));
+  for (const [k, v] of Object.entries(obj)) {
+    if (wanted.has(keyName(k)) && isFilled(v)) return v;
+  }
+  return null;
+}
+
+function centsPrice(v) {
+  return priceNum(v);
+}
+
+function formatPromotionAmount(amount, price) {
+  if (amount === null || amount <= 0) return '';
+  const pct = price && price > 0 ? amount / price * 100 : null;
+  const pctTextPart = pct !== null ? `${pct.toFixed(1)}%` : '';
+  const moneyPart = `约 ${fmtMoney(amount)}`;
+  return `${pctTextPart ? `${pctTextPart}（${moneyPart}，促销条件未返回）` : `${moneyPart}（促销条件未返回）`}`;
+}
+
 function promotionText(product) {
   const promo = findAny(product, [
     'coupon', 'Coupon', 'couponText', 'couponValue', 'DealType', 'ExtraSavings',
@@ -280,7 +301,20 @@ function promotionText(product) {
     'brandPromotion', 'BrandPromotion', 'code', 'Code', 'promoCode', 'PromoCode',
     'dealBadge', 'DealBadge', 'savingBasis', 'SavingBasis'
   ], { scalarOnly: false });
-  return couponText(promo);
+  const text = couponText(promo);
+  if (!text) return '';
+  if (/^\d+(?:\.\d+)?$/.test(text)) {
+    const currentPrice = centsPrice(directField(product, ['Price', 'price']));
+    const salesPrice = centsPrice(directField(product, ['SalesPrice', 'salesPrice']));
+    const couponAmount = centsPrice(text);
+    const deltaAmount = currentPrice !== null && salesPrice !== null && currentPrice > salesPrice
+      ? Number((currentPrice - salesPrice).toFixed(2))
+      : null;
+    const amount = deltaAmount || couponAmount;
+    const formatted = formatPromotionAmount(amount, currentPrice);
+    if (formatted) return formatted;
+  }
+  return text;
 }
 
 function promotionPrice(product) {
@@ -1093,6 +1127,7 @@ function couponAfterDisplay(p) {
 function promotionDiscountDisplay(p) {
   const text = cleanText(p.coupon, 160);
   if (!text) return '无促销';
+  if (/促销条件未返回|约\s*\$/.test(text)) return text;
   const pct = text.match(/(\d+(?:\.\d+)?)\s*%/);
   const amount = text.match(/\$\s*(\d+(?:\.\d+)?)/);
   const conditional = /(buy|购买|件|满|when|with|code|prime|member|会员|save)/i.test(text);
