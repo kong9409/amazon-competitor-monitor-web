@@ -1,77 +1,51 @@
-const form = document.getElementById('runForm');
-const btn = document.getElementById('runBtn');
-const statusEl = document.getElementById('status');
-const summaryEl = document.getElementById('summary');
-const linksEl = document.getElementById('links');
-const preview = document.getElementById('preview');
+const DEFAULT_KEYWORDS = [
+  'power bank',
+  'portable charger',
+  'power bank with built in cable',
+  'fast charging power bank',
+  'travel power bank',
+  'usb c power bank',
+  '10000mah portable charger',
+  '20000mah power bank'
+].join('\n');
 
-function setStatus(type, text) {
-  statusEl.className = `status ${type}`;
-  statusEl.textContent = text;
-}
+const form = document.getElementById('monitorForm');
+const statusBox = document.getElementById('status');
+const fileList = document.getElementById('fileList');
+const submitBtn = document.getElementById('submitBtn');
 
-function formDataJson(form) {
-  const fd = new FormData(form);
-  const obj = Object.fromEntries(fd.entries());
-  obj.demoMode = fd.get('demoMode') === 'on';
-  return obj;
-}
+document.getElementById('keywords').value = DEFAULT_KEYWORDS;
 
-function fmtMs(ms) {
-  if (!Number.isFinite(Number(ms))) return '-';
-  const sec = Math.round(Number(ms) / 1000);
-  if (sec < 60) return `${sec}s`;
-  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
-}
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setStatus('正在生成报告，请不要重复点击……');
+  fileList.innerHTML = '';
+  submitBtn.disabled = true;
 
-function renderSummary(s) {
-  summaryEl.classList.remove('hidden');
-  summaryEl.innerHTML = `
-    <div><b>${s.asin_count ?? 0}</b><span>监控 ASIN</span></div>
-    <div><b>${s.event_count ?? 0}</b><span>变化事件</span></div>
-    <div><b>${s.high_risk_count ?? 0}</b><span>高风险</span></div>
-    <div><b>${s.audit_count ?? 0}</b><span>接口调用</span></div>
-    <div><b>${s.total_request_consumed ?? '-'}</b><span>消耗次数</span></div>
-    <div><b>${fmtMs(s.total_duration_ms)}</b><span>CLI 总运行时间</span></div>`;
-}
+  const payload = Object.fromEntries(new FormData(form).entries());
 
-function renderLinks(urls) {
-  const items = [
-    ['打开 HTML 看板', urls.html, 'primary', false],
-    ['下载 PDF', urls.pdf, '', false],
-    ['下载 Markdown', urls.markdown, '', true],
-    ['下载 JSON', urls.json, '', true],
-    ['下载 CSV', urls.csv, '', true],
-    ['下载全部 ZIP', urls.zip, '', true]
-  ].filter(([, url]) => url);
-  linksEl.classList.remove('hidden');
-  linksEl.innerHTML = items.map(([label, url, cls, download]) =>
-    `<a class="${cls}" href="${url}" ${download ? 'download' : 'target="_blank" rel="noopener"'}>${label}</a>`
-  ).join('');
-  if (urls.html) preview.src = urls.html;
-}
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  btn.disabled = true;
-  summaryEl.classList.add('hidden');
-  linksEl.classList.add('hidden');
-  preview.removeAttribute('src');
-  setStatus('running', '正在调用 Sorftime CLI 并生成报告，请稍等。ASIN 和关键词越多，耗时越长。');
   try {
-    const resp = await fetch('/api/run', {
+    const response = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formDataJson(form))
+      body: JSON.stringify(payload)
     });
-    const data = await resp.json();
-    if (!data.ok) throw new Error(data.error || '生成失败');
-    setStatus('ok', `报告已生成：${data.runId}`);
-    renderSummary(data.summary || {});
-    renderLinks(data.urls || {});
-  } catch (err) {
-    setStatus('err', `生成失败：${err.message}`);
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.message || '生成失败');
+
+    setStatus(`生成成功：${result.reportId}`, 'success');
+    fileList.innerHTML = result.files.map(file => {
+      const target = file.type === 'html' ? ' target="_blank" rel="noopener"' : '';
+      return `<a href="${file.url}"${target}>${file.label}</a>`;
+    }).join('');
+  } catch (error) {
+    setStatus(error.message || '生成失败，请查看服务端日志。', 'error');
   } finally {
-    btn.disabled = false;
+    submitBtn.disabled = false;
   }
 });
+
+function setStatus(message, type = '') {
+  statusBox.className = `status ${type}`.trim();
+  statusBox.textContent = message;
+}

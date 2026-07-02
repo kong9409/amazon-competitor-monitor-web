@@ -1,21 +1,20 @@
 {
-  "name": "amazon-competitor-monitor-web",
-  "version": "1.0.0",
+  "name": "amazon-competitor-monitor-web-kong",
+  "version": "1.2.0",
   "private": true,
-  "description": "Amazon ASIN competitor monitoring web dashboard powered by Sorftime CLI",
-  "type": "module",
+  "description": "Amazon ASIN competitor monitor web tool by kong, inspired by Jax report framework.",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
   },
-  "dependencies": {
-    "archiver": "^7.0.1",
-    "csv-stringify": "^6.5.2",
-    "express": "^4.19.2",
-    "nanoid": "^5.0.7",
-    "sorftime-cli": "1.0.0"
-  },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.19.2",
+    "pdfkit": "^0.15.0",
+    "sanitize-filename": "^1.6.3"
   }
 }
