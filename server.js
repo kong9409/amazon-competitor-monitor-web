@@ -27,11 +27,18 @@ const REPORT_ROOT = process.env.REPORT_ROOT
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.js') || req.path.endsWith('.css')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/reports', express.static(REPORT_ROOT));
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const ensuredProfiles = new Set();
+const jobs = new Map();
 const today = () => new Date().toISOString().slice(0, 10);
 const nowIso = () => new Date().toISOString();
 const safeAsin = (s) => String(s || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -1295,11 +1302,35 @@ const toolCounts={};audit.forEach(a=>{let n=a.interface||'unknown';if(/ProductRe
 const methodLink=document.querySelector('.sticky-nav a[href="#method"]');if(methodLink&&!document.querySelector('.sticky-nav a[href="#ops-plan"]'))methodLink.insertAdjacentHTML('beforebegin','<a href="#ops-plan">运营调控计划</a>');const navLinks=[...document.querySelectorAll('.sticky-nav a[href^="#"]')];const sections=navLinks.map(a=>document.querySelector(a.getAttribute('href'))).filter(Boolean);function setCurrent(id){navLinks.forEach(a=>a.removeAttribute('aria-current'));const active=navLinks.find(a=>a.getAttribute('href')==='#'+id);if(active)active.setAttribute('aria-current','true');}if(sections.length&&'IntersectionObserver'in window){const obs=new IntersectionObserver(entries=>{const active=entries.filter(e=>e.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(active)setCurrent(active.target.id);},{rootMargin:'-18% 0px -68% 0px',threshold:[0,.1,.25,.5,.75]});sections.forEach(s=>obs.observe(s));}else{window.addEventListener('scroll',()=>{let current=sections[0];for(const section of sections){if(section.getBoundingClientRect().top<160)current=section;}if(current)setCurrent(current.id);},{passive:true});}
 })();`; }
 
+function reportUrls(runId) {
+  return {
+    html: `/reports/${runId}/amazon_competitor_monitoring_report.html`,
+    markdown: `/reports/${runId}/amazon_competitor_monitoring_report.md`,
+    json: `/reports/${runId}/report_data.json`,
+    csv: `/reports/${runId}/asin_snapshots.csv`,
+    pdf: `/api/report/${runId}/pdf`,
+    zip: `/api/report/${runId}/zip`
+  };
+}
+
 app.post('/api/run', async (req, res) => {
-  try {
-    const { runId, reportData } = await generateReport(req.body || {});
-    res.json({ ok: true, runId, summary: reportData.summary, urls: { html: `/reports/${runId}/amazon_competitor_monitoring_report.html`, markdown: `/reports/${runId}/amazon_competitor_monitoring_report.md`, json: `/reports/${runId}/report_data.json`, csv: `/reports/${runId}/asin_snapshots.csv`, pdf: `/api/report/${runId}/pdf`, zip: `/api/report/${runId}/zip` } });
-  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+  const jobId = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0,14)}_${nanoid(6)}`;
+  jobs.set(jobId, { ok: true, jobId, status: 'running', started_at: nowIso(), message: '正在后台生成报告' });
+  res.status(202).json({ ok: true, jobId, status: 'running', message: '报告任务已开始' });
+  setImmediate(async () => {
+    try {
+      const { runId, reportData } = await generateReport(req.body || {});
+      jobs.set(jobId, { ok: true, jobId, status: 'done', runId, summary: reportData.summary, urls: reportUrls(runId), started_at: jobs.get(jobId)?.started_at, ended_at: nowIso() });
+    } catch (e) {
+      jobs.set(jobId, { ok: false, jobId, status: 'failed', error: e.message, started_at: jobs.get(jobId)?.started_at, ended_at: nowIso() });
+    }
+  });
+});
+
+app.get('/api/run/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ ok: false, status: 'missing', error: '任务不存在或服务已重启，请重新生成' });
+  res.json(job);
 });
 
 function printPdfWithChromium(htmlPath, pdfPath) {

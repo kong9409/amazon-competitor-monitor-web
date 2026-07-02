@@ -5,6 +5,8 @@ const summaryEl = document.getElementById('summary');
 const linksEl = document.getElementById('links');
 const preview = document.getElementById('preview');
 
+let pollTimer = null;
+
 function setStatus(type, text) {
   statusEl.className = `status ${type}`;
   statusEl.textContent = text;
@@ -51,27 +53,65 @@ function renderLinks(urls) {
   if (urls.html) preview.src = urls.html;
 }
 
+async function readJson(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(text || `HTTP ${resp.status}`);
+  }
+}
+
+async function pollJob(jobId, startedAt = Date.now()) {
+  try {
+    const resp = await fetch(`/api/run/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+    const data = await readJson(resp);
+    if (!resp.ok || data.status === 'failed' || data.ok === false) throw new Error(data.error || '报告生成失败');
+    if (data.status === 'done') {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      btn.disabled = false;
+      setStatus('ok', `报告已生成：${data.runId}`);
+      renderSummary(data.summary || {});
+      renderLinks(data.urls || {});
+      return true;
+    }
+    const sec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    setStatus('running', `报告正在后台生成，已运行 ${sec}s。请保持页面打开，生成完成后会自动显示下载链接。`);
+    return false;
+  } catch (err) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    btn.disabled = false;
+    setStatus('err', `生成失败：${err.message}`);
+    return true;
+  }
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (pollTimer) clearInterval(pollTimer);
   btn.disabled = true;
   summaryEl.classList.add('hidden');
   linksEl.classList.add('hidden');
   preview.removeAttribute('src');
-  setStatus('running', '正在调用 Sorftime CLI 并生成报告，请稍等。ASIN 和关键词越多，耗时越长。');
+  setStatus('running', '已提交任务，正在连接后端...');
+  const startedAt = Date.now();
   try {
     const resp = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(formDataJson(form))
     });
-    const data = await resp.json();
-    if (!data.ok) throw new Error(data.error || '生成失败');
-    setStatus('ok', `报告已生成：${data.runId}`);
-    renderSummary(data.summary || {});
-    renderLinks(data.urls || {});
+    const data = await readJson(resp);
+    if (!resp.ok || !data.ok) throw new Error(data.error || '任务提交失败');
+    setStatus('running', `报告任务已开始：${data.jobId}`);
+    const finished = await pollJob(data.jobId, startedAt);
+    if (!finished && !pollTimer) {
+      pollTimer = setInterval(() => pollJob(data.jobId, startedAt), 3000);
+    }
   } catch (err) {
-    setStatus('err', `生成失败：${err.message}`);
-  } finally {
     btn.disabled = false;
+    setStatus('err', `提交失败：${err.message}`);
   }
 });
