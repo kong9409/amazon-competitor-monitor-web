@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{REPORT_TITLE}}</title>
+  <style>{{CSS}}</style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">ASIN 竞品监控</div>
+    <a href="#overview">总览</a>
+    <a href="#changes">变化概览</a>
+    <a href="#actions">处理建议</a>
+    <a href="#asins">ASIN 明细</a>
+    <a href="#compare">自有 vs 竞品</a>
+    <a href="#keywords">关键词表现</a>
+    <a href="#audit">接口审计</a>
+    <p class="muted small">数据源：Sorftime CLI<br>离线 HTML 报告</p>
+  </aside>
+  <main class="content">
+    <section id="overview" class="hero">
+      <div class="pill">{{MARKETPLACE}} · {{REPORT_DATE}}</div>
+      <h1>{{REPORT_TITLE}}</h1>
+      <p>按固定 SOP 读取监控清单、调用 Sorftime CLI、生成快照差异与运营处理建议。</p>
+      <div class="cards">
+        <div class="card"><span>监控 ASIN</span><strong>{{ASIN_COUNT}}</strong></div>
+        <div class="card"><span>竞品 ASIN</span><strong>{{COMPETITOR_COUNT}}</strong></div>
+        <div class="card"><span>变化事件</span><strong>{{EVENT_COUNT}}</strong></div>
+        <div class="card"><span>高风险</span><strong>{{RISK_COUNT}}</strong></div>
+        <div class="card"><span>建议动作</span><strong>{{ACTION_COUNT}}</strong></div>
+      </div>
+    </section>
+
+    <section id="changes" class="panel">
+      <h2>今日变化概览</h2>
+      <div id="events"></div>
+    </section>
+
+    <section id="actions" class="panel">
+      <h2>处理建议</h2>
+      <div id="actionsTable"></div>
+    </section>
+
+    <section id="asins" class="panel">
+      <h2>ASIN 监控明细</h2>
+      <div id="asinTable"></div>
+    </section>
+
+    <section id="compare" class="panel">
+      <h2>自有 ASIN vs 竞品</h2>
+      <div class="chart-grid">
+        <div class="chart-card"><h3>价格对比</h3><div id="priceBars" class="bars"></div></div>
+        <div class="chart-card"><h3>评分对比</h3><div id="ratingBars" class="bars"></div></div>
+        <div class="chart-card"><h3>评论数对比</h3><div id="reviewBars" class="bars"></div></div>
+        <div class="chart-card"><h3>月销量估算</h3><div id="salesBars" class="bars"></div></div>
+      </div>
+    </section>
+
+    <section id="keywords" class="panel">
+      <h2>关键词表现</h2>
+      <div id="keywordTable"></div>
+    </section>
+
+    <section id="audit" class="panel">
+      <h2>Sorftime CLI 接口审计</h2>
+      <p class="muted">所有接口调用均保存命令预览、参数、原始响应文件、stderr 文件、缓存命中和耗时。密钥不会写入审计。</p>
+      <div id="auditTable"></div>
+    </section>
+  </main>
+  <script id="report-data" type="application/json">{{REPORT_DATA_JSON}}</script>
+  <script>{{JS}}</script>
+</body>
+</html>

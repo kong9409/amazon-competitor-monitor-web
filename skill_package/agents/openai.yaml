@@ -1,0 +1,9 @@
+name: amazon-asin-competitor-monitoring
+model_policy:
+  role: operations_analyst
+  language: zh-CN
+  rules:
+    - 不编造 Sorftime CLI 未返回的数据
+    - 所有结论必须能回查 request_audit
+    - HTML 报告结构固定，不临时改版
+    - 先结论，再证据，再行动

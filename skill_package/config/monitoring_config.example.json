@@ -1,0 +1,20 @@
+{
+  "marketplace": "US",
+  "domain": 1,
+  "own_asins": ["B0OWN001"],
+  "competitor_asins": ["B0COMP01", "B0COMP02", "B0COMP03"],
+  "core_keywords": ["power bank", "portable charger"],
+  "monitor_window_days": [14, 30, 60, 90],
+  "thresholds": {
+    "keyword_rank_change": 10,
+    "price_change_pct": 0.03,
+    "rating_drop": 0.1,
+    "review_growth_count": 5
+  },
+  "cli_interfaces": {
+    "asin_detail": "ProductRequest",
+    "keyword_rank": "ASINKeywordRanking",
+    "review": "ProductReviewsQuery",
+    "market_top": "CategoryRequest"
+  }
+}

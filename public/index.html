@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Amazon 竞品监控报告工具</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="pill">Sorftime CLI · ASIN Monitor · HTML/PDF/Markdown</div>
+        <h1>Amazon 竞品监控报告工具</h1>
+        <p>输入自己的 Sorftime CLI Token、自有 ASIN、竞品 ASIN 和核心关键词，一键生成 HTML 看板，并导出 PDF、Markdown、JSON、CSV 或 ZIP。</p>
+      </div>
+      <div class="notice">
+        <b>安全提示</b>
+        <span>Token 只用于本次调用，不写入报告、不保存到前端。部署到公网时建议仅团队内部使用。</span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card form-card">
+        <h2>1. 输入监控配置</h2>
+        <form id="runForm">
+          <input type="hidden" name="marketplace" value="US" />
+          <input type="hidden" name="domain" value="1" />
+          <input type="hidden" name="productInterface" value="ProductRequest" />
+          <input type="hidden" name="salesInterface" value="AsinSalesVolume" />
+          <input type="hidden" name="asinKeywordsInterface" value="ASINRequestKeywordv2" />
+          <input type="hidden" name="keywordInterface" value="ASINKeywordRanking" />
+          <input type="hidden" name="keywordMetricInterface" value="KeywordExtends" />
+          <input type="hidden" name="reviewInterface" value="ProductReviewsQuery" />
+
+          <label>Sorftime CLI Token
+            <input name="sorftimeToken" type="password" autocomplete="off" placeholder="粘贴你的 Sorftime CLI Token；不填则使用演示模式" />
+          </label>
+
+          <label>自有 ASIN（每行一个）
+            <textarea name="ownAsins" rows="3" placeholder="B0OWN001"></textarea>
+          </label>
+
+          <label>竞品 ASIN（每行一个）
+            <textarea name="competitorAsins" rows="5" placeholder="B0COMP01&#10;B0COMP02&#10;B0COMP03"></textarea>
+          </label>
+
+          <label>核心关键词（每行一个）
+            <textarea name="coreKeywords" rows="5" placeholder="power bank&#10;portable charger"></textarea>
+          </label>
+
+          <button type="submit" id="runBtn">生成竞品监控报告</button>
+        </form>
+      </section>
+
+      <section class="card output-card">
+        <h2>2. 报告输出</h2>
+        <div id="status" class="status idle">等待生成报告</div>
+        <div id="summary" class="summary hidden"></div>
+        <div id="links" class="links hidden"></div>
+        <iframe id="preview" title="报告预览"></iframe>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

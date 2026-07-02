@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm ci --ignore-scripts"]
+
+[start]
+cmd = "npm start"
+
+[variables]
+NODE_ENV = "production"
+AMAZON_MONITOR_DATA_DIR = "/tmp/amazon-competitor-monitor-web-data"
