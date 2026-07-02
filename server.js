@@ -163,6 +163,24 @@ function priceNum(v) {
   return looksLikeCents ? Number((n / 100).toFixed(2)) : n;
 }
 
+function cpcNum(v) {
+  const n = num(v);
+  if (n === null) return null;
+  const text = String(v ?? '').trim();
+  const explicitDollars = /\$/.test(text);
+  const integerLike = /^[$\s]*\d+[$\s]*$/.test(text);
+  if (integerLike && n >= 20) return Number((n / 100).toFixed(2));
+  if (!explicitDollars && n >= 20) return Number((n / 100).toFixed(2));
+  return n;
+}
+
+function cpcNote(v) {
+  const raw = num(v);
+  if (raw === null) return '';
+  const normalized = cpcNum(v);
+  return raw !== normalized ? `原始值 ${raw}，按美分口径换算` : '原始美元口径';
+}
+
 function boolFlag(v) {
   if (v === true) return true;
   if (v === false || v === null || v === undefined || v === '') return false;
@@ -553,13 +571,16 @@ function normalizeKeyword(raw, asin, keyword, metricRaw = {}) {
   const metricData = unwrapData(metricRaw);
   const metricRow = Array.isArray(metricData) ? metricData[0] : metricData;
   const keywordObj = findAny(record, ['keyword', 'Keyword'], { scalarOnly: false }) || metricRow || data;
+  const cpcRaw = findVal(keywordObj, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid']);
   return {
     asin,
     keyword,
     organic_rank: organic || null,
     ad_rank: ad || null,
     search_volume: num(findVal(keywordObj, ['searchVolume', 'SearchVolume', 'volume', 'keywordSearches'])) || null,
-    cpc: priceNum(findVal(keywordObj, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid'])) || null,
+    cpc: cpcNum(cpcRaw) || null,
+    cpc_raw: num(cpcRaw),
+    cpc_note: cpcNote(cpcRaw),
     product_count: num(findVal(keywordObj, ['ProductsTotal', 'productsTotal', 'productCount', 'ProductCount', 'goodsNum', 'GoodsNum', 'competitorCount'])) || null,
     purchase_rate: num(findVal(keywordObj, ['purchaseRate', 'conversionRate', 'cvr', 'searchConversionRate', 'ClickConversionRateD90'])) || null,
     data_status: error ? `调用失败：${error}` : 'OK'
@@ -571,20 +592,26 @@ function normalizeKeywordMetrics(raw, seedKeyword, source) {
   const sourceName = source || 'KeywordExtends';
   const mapped = rows.map(row => {
     const keyword = cleanText(findVal(row, ['keyword', 'Keyword', 'name', 'Name', 'word', 'Word', 'term', 'Term']) || seedKeyword, 160);
+    const cpcRaw = findVal(row, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid']);
     return {
       keyword,
       search_volume: num(findVal(row, ['searchVolume', 'SearchVolume', 'volume', 'keywordSearches', 'Searches', 'searches'])) || null,
-      cpc: priceNum(findVal(row, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid'])) || null,
+      cpc: cpcNum(cpcRaw) || null,
+      cpc_raw: num(cpcRaw),
+      cpc_note: cpcNote(cpcRaw),
       product_count: num(findVal(row, ['ProductsTotal', 'productsTotal', 'productCount', 'ProductCount', 'goodsNum', 'GoodsNum', 'competitorCount'])) || null,
       source: sourceName
     };
   }).filter(r => r.keyword);
   if (mapped.length) return mapped;
   const data = unwrapData(raw);
+  const cpcRaw = findVal(data, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid']);
   return [{
     keyword: seedKeyword,
     search_volume: num(findVal(data, ['searchVolume', 'SearchVolume', 'volume', 'keywordSearches', 'Searches', 'searches'])) || null,
-    cpc: priceNum(findVal(data, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid'])) || null,
+    cpc: cpcNum(cpcRaw) || null,
+    cpc_raw: num(cpcRaw),
+    cpc_note: cpcNote(cpcRaw),
     product_count: num(findVal(data, ['ProductsTotal', 'productsTotal', 'productCount', 'ProductCount', 'goodsNum', 'GoodsNum', 'competitorCount'])) || null,
     source: sourceName
   }];
@@ -964,12 +991,56 @@ function buildOperationPlan(products) {
   const priceCut = ownPrice && compMedianPrice
     ? clamp(Math.max(3, Math.min(10, priceGapPct > 0 ? priceGapPct * 0.65 : 5)), 3, 10)
     : 5;
+  const priceAction = (() => {
+    if (!ownPrice || !compMedianPrice) {
+      return {
+        action: '价格数据不足，先不做直接降价；优先用 Coupon、会员折扣或广告小预算测试转化。',
+        liftLow: 0,
+        liftHigh: 3,
+        reason: '缺少有效自有价或竞品价，直接降价无法量化对比。',
+        metric: `预计月单量 +0.0% 至 +3.0%，约 +0 至 +${Math.round(baseSales * 0.03)} 单/月。`,
+        risk: '价格数据不完整时直接改价，容易误伤利润。',
+        priority: 'P2'
+      };
+    }
+    if (ownPrice <= compLowestPrice) {
+      return {
+        action: `当前价 ${fmtMoney(ownPrice)} 已不高于竞品最低价 ${fmtMoney(compLowestPrice)}，不建议继续降价；先稳住标价，用 Coupon/会员折扣和广告投放验证转化。`,
+        liftLow: 0,
+        liftHigh: 4,
+        reason: `自有价已处在竞品低价区间，继续降价的边际收益不确定，利润风险高。竞品中位价 ${fmtMoney(compMedianPrice)} 仅作为价格带参考。`,
+        metric: `预计稳价叠加流量/折扣测试带来月单量 +0.0% 至 +4.0%，约 +0 至 +${Math.round(baseSales * 0.04)} 单/月。`,
+        risk: '继续低于最低竞品价可能引发价格战，并压缩毛利。',
+        priority: 'P2'
+      };
+    }
+    if (ownPrice < compMedianPrice) {
+      return {
+        action: `当前价 ${fmtMoney(ownPrice)} 低于竞品中位价 ${fmtMoney(compMedianPrice)}，不建议机械下调；可保持标价，必要时用小额 Coupon 做短期转化测试。`,
+        liftLow: 0,
+        liftHigh: 5,
+        reason: `自有价相对竞品中位价低 ${pctText(Math.abs(priceGapPct))}，价格不是主要劣势，应优先检查广告入口、评价和转化。`,
+        metric: `预计月单量 +0.0% 至 +5.0%，约 +0 至 +${Math.round(baseSales * 0.05)} 单/月。`,
+        risk: '在已低于中位价时继续降价，可能只换来更低利润，而不明显增加订单。',
+        priority: 'P1'
+      };
+    }
+    return {
+      action: `当前价 ${fmtMoney(ownPrice)} 高于竞品中位价 ${fmtMoney(compMedianPrice)}，建议先下调约 ${pctText(priceCut)}，目标接近中位价但不一次性低于竞品最低价 ${fmtMoney(compLowestPrice)}。`,
+      liftLow: priceCut * 1.1,
+      liftHigh: priceCut * 1.9,
+      reason: `价格弹性模型：同类标品假设每降价 1%，订单提升约 1.1%-1.9%。当前自有价高于竞品中位价约 ${pctText(priceGapPct)}。`,
+      metric: `预计月单量 +${pctText(priceCut * 1.1)} 至 +${pctText(priceCut * 1.9)}，约 +${Math.round(baseSales * priceCut * 0.011)} 至 +${Math.round(baseSales * priceCut * 0.019)} 单/月。`,
+      risk: '会直接压缩毛利；建议先用 3-7 天小幅测试。',
+      priority: priceGapPct > 3 ? 'P0' : 'P1'
+    };
+  })();
   const couponPct = own.coupon ? 3 : 7;
   const primePct = 5;
   const adsGap = compMedianAds > ownAds ? (compMedianAds - ownAds) / Math.max(compMedianAds, 1) : 0.15;
   return [
-    mk('直接降价', `把当前价 ${fmtMoney(ownPrice)} 下调约 ${pctText(priceCut)}，优先靠近竞品中位价 ${fmtMoney(compMedianPrice)}，不要一次性低于竞品最低价 ${fmtMoney(compLowestPrice)}。`, priceCut * 1.1, priceCut * 1.9, `价格弹性模型：同类标品假设每降价 1%，订单提升约 1.1%-1.9%。当前自有价相对竞品中位价差约 ${pctText(priceGapPct)}。`, `预计月单量 +${pctText(priceCut * 1.1)} 至 +${pctText(priceCut * 1.9)}，约 +${Math.round(baseSales * priceCut * 0.011)} 至 +${Math.round(baseSales * priceCut * 0.019)} 单/月。`, '会直接压缩毛利；建议先用 3-7 天小幅测试。', priceGapPct > 3 ? 'P0' : 'P1'),
-    mk('Coupon', `开启 ${couponPct}% Coupon 或等值金额券，保持标价不变，用绿色券标提升点击和转化。`, 5, 12, 'Coupon 通常影响前台点击注意力和到手价感知，适合不想频繁改标价时使用。', `预计转化带来的月单量 +5.0% 至 +12.0%，约 +${Math.round(baseSales * 0.05)} 至 +${Math.round(baseSales * 0.12)} 单/月。`, '券后价要和直接降价一起看，避免叠加后低于利润底线。', own.coupon ? 'P2' : 'P1'),
+    mk('直接降价', priceAction.action, priceAction.liftLow, priceAction.liftHigh, priceAction.reason, priceAction.metric, priceAction.risk, priceAction.priority),
+    mk('Coupon', `开启 ${couponPct}% Coupon 或等值金额券，保持标价不变，用绿色券标提升点击和转化。`, 5, 12, 'Coupon 通常影响前台点击注意力和优惠感知，适合不想频繁改标价时使用。', `预计转化带来的月单量 +5.0% 至 +12.0%，约 +${Math.round(baseSales * 0.05)} 至 +${Math.round(baseSales * 0.12)} 单/月。`, '金额券、百分比券和多件促销要分开看，避免把有条件促销误当成单件成交价。', own.coupon ? 'P2' : 'P1'),
     mk('会员折扣', `设置 ${primePct}% Prime/会员专属折扣，用于承接高意向 Prime 用户。`, 3, 8, '会员折扣更偏向提高转化效率，对价格敏感但信任 Prime 的用户更有效。', `预计月单量 +3.0% 至 +8.0%，约 +${Math.round(baseSales * 0.03)} 至 +${Math.round(baseSales * 0.08)} 单/月。`, '会员折扣可见范围较 Coupon 窄，适合配合广告流量使用。', 'P2'),
     mk('ASIN 广告', `围绕核心词和竞品 ASIN 开 Sponsored Products：核心词保排名，竞品 ASIN 做商品投放，预算优先补足广告词缺口。`, clamp(6 + adsGap * 10, 6, 14), clamp(14 + adsGap * 18, 14, 28), `广告词覆盖低于竞品时，先补流量入口。当前自有广告词 ${fmtNum(ownAds)}，竞品中位广告词 ${fmtNum(compMedianAds)}。`, `预计广告带来的月单量 +${pctText(clamp(6 + adsGap * 10, 6, 14))} 至 +${pctText(clamp(14 + adsGap * 18, 14, 28))}；需用 ACOS/TACOS 校验。`, '如果 Listing 转化弱，先放大广告会推高 ACOS；建议与 Coupon 或会员折扣联动测试。', compMedianAds > ownAds ? 'P0' : 'P1')
   ];
@@ -1007,27 +1078,33 @@ function asinUrl(asin) {
 }
 
 function couponAfterPrice(p) {
-  if (p.coupon_after_price !== null && p.coupon_after_price !== undefined) return p.coupon_after_price;
-  const price = num(p.price);
-  if (price === null) return null;
-  const text = cleanText(p.coupon, 80);
-  const pct = text.match(/(\d+(?:\.\d+)?)\s*%/);
-  if (pct) return Number((price * (1 - Number(pct[1]) / 100)).toFixed(2));
-  const off = text.match(/\$?\s*(\d+(?:\.\d+)?)/);
-  if (off && /off|coupon|\$/i.test(text)) return Math.max(0, Number((price - Number(off[1])).toFixed(2)));
-  return price;
+  return null;
 }
 
 function hasPromotion(p) {
-  const price = num(p.price);
-  const after = couponAfterPrice(p);
-  return Boolean(p.coupon) || (price !== null && after !== null && after < price);
+  return Boolean(cleanText(p.coupon, 120));
 }
 
 function couponAfterDisplay(p) {
   if (!hasPromotion(p)) return '无促销';
-  const after = couponAfterPrice(p);
-  return after === null ? esc(p.coupon || '有促销') : fmtMoney(after);
+  return esc(promotionDiscountDisplay(p));
+}
+
+function promotionDiscountDisplay(p) {
+  const text = cleanText(p.coupon, 160);
+  if (!text) return '无促销';
+  const pct = text.match(/(\d+(?:\.\d+)?)\s*%/);
+  const amount = text.match(/\$\s*(\d+(?:\.\d+)?)/);
+  const conditional = /(buy|购买|件|满|when|with|code|prime|member|会员|save)/i.test(text);
+  if (pct) return `${Number(pct[1]).toFixed(Number(pct[1]) % 1 ? 1 : 0)}%${conditional ? '（有条件）' : ''}`;
+  if (amount) return `${fmtMoney(Number(amount[1]))}${conditional ? '（有条件）' : ''}`;
+  return text;
+}
+
+function promotionDiscountPct(p) {
+  const text = cleanText(p.coupon, 160);
+  const pct = text.match(/(\d+(?:\.\d+)?)\s*%/);
+  return pct ? Number(Number(pct[1]).toFixed(1)) : 0;
 }
 
 function productTag(p) {
@@ -1107,17 +1184,18 @@ function keywordMissingRows(d) {
 function keywordMetricRows(d) {
   const rows = [];
   const seen = new Set();
+  const cpcCell = k => k.cpc ? `<span title="${esc(k.cpc_note || '')}">${fmtMoney(k.cpc)}</span>` : '-';
   for (const k of d.keyword_metrics || []) {
     if (!k.keyword || seen.has(k.keyword)) continue;
     seen.add(k.keyword);
     const supply = k.search_volume && k.product_count ? Number((k.search_volume / Math.max(1, k.product_count)).toFixed(2)) : '-';
-    rows.push(`<tr><td>${esc(k.keyword)}</td><td><strong class="metric-emphasis">${fmtNum(k.search_volume)}</strong></td><td>${k.cpc ? fmtMoney(k.cpc) : '-'}</td><td>${fmtNum(k.product_count)}</td><td>${supply}</td><td>${esc(k.source || d.input.interfaces.keywordMetric || 'KeywordExtends')}</td></tr>`);
+    rows.push(`<tr><td>${esc(k.keyword)}</td><td><strong class="metric-emphasis">${fmtNum(k.search_volume)}</strong></td><td>${cpcCell(k)}</td><td>${fmtNum(k.product_count)}</td><td>${supply}</td><td>${esc(k.source || d.input.interfaces.keywordMetric || 'KeywordExtends')}</td></tr>`);
   }
   for (const k of d.keyword_gap || []) {
     if (seen.has(k.keyword)) continue;
     seen.add(k.keyword);
     const supply = k.search_volume && k.search_volume > 0 ? '-' : '-';
-    rows.push(`<tr><td>${esc(k.keyword)}</td><td><strong class="metric-emphasis">${fmtNum(k.search_volume)}</strong></td><td>${k.cpc ? fmtMoney(k.cpc) : '-'}</td><td>${fmtNum(k.product_count)}</td><td>${supply}</td><td>${esc(d.input.interfaces.keywordMetric || 'KeywordExtends')}</td></tr>`);
+    rows.push(`<tr><td>${esc(k.keyword)}</td><td><strong class="metric-emphasis">${fmtNum(k.search_volume)}</strong></td><td>${cpcCell(k)}</td><td>${fmtNum(k.product_count)}</td><td>${supply}</td><td>${esc(d.input.interfaces.keywordMetric || 'KeywordExtends')}</td></tr>`);
   }
   for (const kw of d.input.core_keywords || []) {
     if (!seen.has(kw)) rows.push(`<tr><td>${esc(kw)}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>输入关键词</td></tr>`);
@@ -1258,7 +1336,7 @@ function renderExactHtml(d) {
   const reviewSampleRows = (d.review_voc || []).slice(0, 30).map(r => `<tr><td><strong class="metric-emphasis">${esc(r.asin)}</strong></td><td>${fmtRating(r.star)}</td><td>${esc(r.title || '-')}</td><td>${esc(r.body || '-')}</td><td>${r.vp ? 'VP' : '-'}</td></tr>`).join('');
   const audit = d.request_audit || [];
   pendingOpsSection = sectionShell('ops-plan', '09 运营调控', '价格 / 折扣 / 广告调控计划', '把直接降价、Coupon、会员折扣和 ASIN 广告放到同一套量化框架里。以下为基于当前价格、月销、竞品价格和广告词覆盖的模型估算，不等同于真实实验结果，建议用 3-7 天 A/B 或分阶段测试校准。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('调控动作预估增量','operationLiftChart','bar','按当前估算月销量换算为订单增量区间；实际结果需结合毛利、库存、ACOS/TACOS 校验。')}</div>${tableBlock(['优先级','动作','操作建议','预估单量影响','量化依据','运营指标','风险/约束'], operationPlanRows(d), 1500)}`);
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ASIN 竞品监控报告</title><script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script><style>${exactCss()}</style></head><body><div class="report-watermark" aria-hidden="true"></div><div class="min-h-screen"><header class="report-header sticky top-0 z-40 border-b border-line bg-white/92 backdrop-blur no-print"><div class="mx-auto flex max-w-[1500px] items-center justify-between gap-4 px-5 py-3"><div class="flex min-w-0 items-center gap-3"><div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-ink text-white"><i data-lucide="activity" class="h-5 w-5"></i></div><div class="min-w-0"><p class="truncate text-sm font-semibold text-ink">Amazon 竞品监控报告工具 by kong</p><p class="truncate text-xs text-muted">${esc(d.meta.marketplace)} ｜ 快照：${esc(d.meta.report_date)} ｜ Sorftime CLI + 本地快照差异</p></div></div><span class="rounded-full border border-line bg-white px-3 py-1 text-xs text-muted">${d.meta.demo_mode ? '演示模式' : '真实请求'}</span></div></header><div class="report-layout mx-auto grid max-w-[1500px] grid-cols-1 gap-5 px-5 py-5 lg:grid-cols-[280px_minmax(0,1fr)]"><aside class="no-print hidden lg:block"><nav class="sticky-nav sticky top-[76px] max-h-[calc(100vh-96px)] overflow-y-auto rounded-lg border border-line bg-white p-3 shadow-panel"><p class="px-3 pb-2 text-xs font-bold uppercase tracking-wide text-muted">监控目录</p><div class="space-y-3"><div><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-slate-400"><i data-lucide="layout-dashboard" class="h-3.5 w-3.5"></i>总览</p><a href="#overview" aria-current="true">今日总览</a><a href="#event-board">变化概览</a><a href="#actions">处理建议</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="boxes" class="h-3.5 w-3.5"></i>监控对象</p><a href="#watch-wall">ASIN 监控概览</a><a href="#asin-table">ASIN 明细表</a><a href="#comparison">自有 vs 竞品</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="line-chart" class="h-3.5 w-3.5"></i>证据</p><a href="#trends">趋势证据</a><a href="#keywords">关键词表现</a><a href="#reviews">评论 VOC</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="shield-check" class="h-3.5 w-3.5"></i>审计</p><a href="#method">数据口径</a><a href="#interface-audit">接口审计</a></div></div><div class="mt-4 rounded-md bg-slate-50 p-3 text-xs leading-5 text-muted"><b class="text-ink">阅读主线</b><br>先看竞品今天变了什么，再看自有输赢在哪，最后落到今天要复核或处理的事项。</div></nav></aside><main class="space-y-5"><section id="overview" class="overflow-hidden rounded-lg border border-line bg-white shadow-panel"><div class="grid gap-0 xl:grid-cols-[1.1fr_0.9fr]"><div class="p-7"><div class="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700"><i data-lucide="radar" class="h-4 w-4"></i>${esc(d.meta.marketplace)} · ASIN 竞品监控</div><h1 class="hero-title max-w-4xl text-ink">Amazon 竞品监控报告工具 by kong</h1><p class="hero-copy mt-4 max-w-3xl text-muted">复刻 Jax 丰哥在跨境写代码的 ASIN 竞品监控报告框架。输入 CLI Token、自有 ASIN、竞品 ASIN 和关键词后，自动采集 Sorftime 数据并形成同版式监控报告。</p><p class="mt-3 text-sm"><a class="text-brand hover:underline" href="http://mp.weixin.qq.com/s?__biz=MzY5MTMyNTQ3Mg==&mid=2247483693&idx=1&sn=439089733fc16d941b2f413ab5c33453&chksm=f525c7bd3ba225a68fd0636cb24b43d67ce2a374315b5a9ecd43dc16baca5953332b9626109b&scene=126&sessionid=1782973447&subscene=227&clicktime=1782973450&enterid=1782973450#rd" target="_blank" rel="noopener">查看原文章：Jax 丰哥在跨境写代码</a></p><div class="mt-6 grid gap-3 md:grid-cols-4 xl:grid-cols-2">${metricCard('待处理事项', `${d.summary.opportunity_count} 项`, 'P0/P1/P2')}${metricCard('风险事件', `${riskEvents.length} 个`, '需复核原因')}${metricCard('机会事件', `${oppEvents.length} 个`, '需结合业务确认')}${metricCard('监控状态', d.meta.demo_mode ? '演示' : '真实', '基于当前快照判断')}</div><div class="mt-5 grid gap-4 md:grid-cols-2"><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">监控范围</p><p class="mt-1 text-sm leading-6 text-muted">${d.input.own_asins.length} 个自有 ASIN，${d.input.competitor_asins.length} 个竞品 ASIN，快照日期 ${esc(d.meta.report_date)}。</p></div><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">当前状态</p><p class="mt-1 text-sm leading-6 text-muted">报告来自 ${d.meta.demo_mode ? '演示数据' : 'Sorftime CLI 真实请求'}，接口消耗 ${d.summary.total_request_consumed || '-'} 次，CLI 运行 ${fmtMs(d.summary.total_duration_ms)}。</p></div></div></div><div class="bg-ink p-7 text-white"><p class="text-xs font-bold uppercase tracking-wide text-emerald-300">今日处理</p><h2 class="mt-1 text-2xl font-semibold">优先复核事项</h2><p class="mt-3 text-sm leading-6 text-slate-300">建议结合库存、广告、订单和利润数据复核；本页只回答竞品监控层面的变化与差距。</p><div class="mt-5 space-y-3">${heroActions || '<div class="rounded-lg border border-slate-700 bg-slate-900 p-4 text-slate-300">暂无优先复核事项</div>'}</div></div></div></section>${sectionShell('event-board','01 变化概览','今日变化概览','以下事件由当前快照与最近一次历史快照比对生成。首次基线仅记录纳入监控，不代表竞品发生实际变化。', `<div class="mt-5 grid gap-4 md:grid-cols-5">${eventColumns}</div>`)}${sectionShell('watch-wall','02 ASIN 概览','ASIN 监控概览','按 ASIN 汇总当前价格、BSR、估算销量、评分、评论和关键词覆盖，便于快速查看自有产品与竞品状态。主图来自 Sorftime CLI 返回的真实商品图，点击可放大。', `<div class="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">${watchCards}</div>`)}${sectionShell('actions','03 处理建议','处理建议','将变化事件转成运营动作，便于今天直接复核。', tableBlock(['优先级','动作类型','对象','触发原因','建议动作'], actionRows, 980))}${sectionShell('asin-table','04 ASIN 明细','ASIN 监控列表','汇总自有与竞品的当前状态，包括价格、BSR、估算销量、评分评论、关键词和 Listing 资产。', tableBlock(['主图','角色','ASIN','品牌','价格','Coupon 后','BSR','估算销量','评分','Rating','Review','流量词','广告词','卖家数','A+','视频','标签'], asinRows, 1680))}${sectionShell('comparison','05 对比分析','自有 ASIN vs 竞品','从价格、销量、BSR、评分和关键词覆盖等维度对比自有 ASIN 与竞品差距。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('价格带对比','priceBandCompareChart','horizontal_bar','截面图，按当前价格或券后到手价排序；用于判断自有 ASIN 处于价格带的哪个位置。')}${chartCard('估算月销量对比','salesVolumeCompareChart','horizontal_bar','销量为 Sorftime 估算口径，不等同于 Amazon 后台真实订单。')}${chartCard('BSR 截面对比','bsrSnapshotCompareChart','horizontal_bar','BSR 越小越好；排序按当前 BSR 从优到弱排列。')}${chartCard('Coupon 力度对比','couponDiscountCompareChart','horizontal_bar','折扣率=(当前价格-券后到手价)/当前价格。')}${chartCard('Listing 资产覆盖','listingAssetCoverageChart','bar','A+=35 分、视频=25 分、每个变体 4 分封顶 40 分。')}${chartCard('Buybox / 卖家数对比','buyboxSellerCompareChart','bar','卖家数用于监控 Buybox 稳定性。')}${chartCard('口碑壁垒散点','ratingReviewMoatChart','scatter','右上代表评论厚度与评分同时较强。')}</div>${tableBlock(['自有 ASIN','竞品 ASIN','价格差','销量差','BSR 差','评分差','流量词差','竞品标签'], compareRowsExact, 1120)}<p class="mt-2 text-xs text-muted">价格差、销量差、流量词差均为竞品减自有；BSR 差为数值差，越小通常越好。</p>`)}${sectionShell('trends','06 趋势证据','趋势与事件','优先使用 Sorftime ProductRequest trend=1 的近 15 天趋势；缺失时回退到本地每日快照。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('价格趋势','priceTrendChart','line','来自 Sorftime ProductRequest trend=1 返回的近 15 天价格趋势；缺失点为空。')}${chartCard('BSR 趋势','bsrTrendChart','line','Y 轴已反转，越靠上排名越好。')}${chartCard('估算日销量趋势','salesTrendChart','line','销量为估算口径，不等同于真实订单。')}${chartCard('评分趋势','ratingTrendChart','line','真实趋势不足时按当前快照生成确定性序列。')}${chartCard('Review 数趋势','reviewTrendChart','line','用于观察口碑厚度增长。')}${chartCard('今日事件结构','eventStructureChart','pie','按风险、机会、记录三类聚合今日事件。')}</div>${tableBlock(['角色','ASIN','趋势区间','价格首尾','价格变化','BSR 首尾','BSR 变化','估算日销量首尾','估算日销量变化'], trendRows(d), 1180)}${tableBlock(['日期','严重度','方向','角色','ASIN','类型','事件摘要'], trendEventRows, 1180)}`)}${sectionShell('keywords','07 关键词表现','关键词表现','汇总 ASIN 级关键词覆盖、竞品覆盖但自有缺失的词，以及核心词搜索漏斗近似。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('关键词覆盖对比','keywordCoverageCompareChart','bar','来自 ASINRequestKeywordv2 聚合；自然词按 SearchPosition 非空近似，广告词按 AdPosition 非空近似。')}${chartCard('关键词机会矩阵','keywordOpportunityMatrixChart','scatter','高搜索量且排名偏后的词优先复核广告与 Listing 覆盖。')}${chartCard('核心词 SOV 近似','keywordSovApproxChart','horizontal_bar','近似 SOV：用 ASIN 关键词自然位/广告位覆盖占比估算。')}</div>${tableBlock(['角色','ASIN','全部流量词','自然词','广告词','关联流量份额'], keywordCoverageRows(d.asin_snapshots), 1120)}${tableBlock(['关键词','覆盖竞品数','判断','建议'], keywordMissingRows(d), 1120)}${tableBlock(['关键词','搜索量','CPC','商品数','供需近似','来源'], keywordMetricRows(d), 1120)}`)}${sectionShell('reviews','08 评论 VOC','评论与 VOC','基于评论样本归纳好评主题、差评主题和产品改进线索。', `${tableBlock(['ASIN','1星占比','2星占比','3星占比','4星占比','5星占比'], reviewDistributionRows(d), 1040)}${tableBlock(['方向','归纳点','提及评论数','代表评论'], vocTopicRows(d), 1040)}${tableBlock(['ASIN','星级','标题','内容摘要','标识'], reviewSampleRows, 1040)}`)}${sectionShell('method','09 数据口径','数据口径','本报告基于 Sorftime CLI 响应和本地每日快照生成。销量、销售额、BSR、关键词和评论均以第三方口径为准，不等同于 Amazon 后台真实订单、广告或利润数据。', `<div class="mt-5 grid gap-4 md:grid-cols-2"><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">当前快照</p><p class="mt-1 text-sm leading-6 text-muted">价格、Coupon、BSR、评分评论、Listing 资产、卖家数和关键词覆盖来自当日采集。</p></div><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">变更事件</p><p class="mt-1 text-sm leading-6 text-muted">标题、五点、图片、变体、卖家、价格和关键词变化由本地快照差异生成。</p></div></div>`)}${sectionShell('interface-audit','10 接口审计','Sorftime CLI 接口审计','记录本次报告涉及的 Sorftime CLI 请求、缓存状态、消耗次数和调用时间，便于复核数据来源。', `<div class="mt-5 interface-metric-grid">${metricCard('已记录调用', `${audit.length} 次`, 'manifest.requests')}${metricCard('真实请求', `${audit.filter(a => a.ok).length} 次`, 'PAID_REQUEST')}${metricCard('消耗次数', d.summary.total_request_consumed || '-', 'requestConsumed')}${metricCard('失败请求', `${d.summary.failed_calls} 次`, 'FAILED')}</div><div class="mt-5 interface-audit-grid"><div class="rounded-lg border border-line bg-white p-4"><p class="text-sm font-semibold text-ink">接口调用计次</p><div id="interfaceAuditChart" class="chart mt-3"></div><p class="mt-2 text-xs text-muted">按 Sorftime 逻辑工具统计，每次 CLI 调用都会计入。</p></div><div class="interface-summary-table overflow-auto rounded-lg border border-line"><table class="data-table w-full border-collapse" style="min-width:560px"><thead><tr><th>工具</th><th>次数</th></tr></thead><tbody>${interfaceSummaryRows(audit)}</tbody></table></div></div><div class="mt-4 rounded-lg border border-line"><p class="border-b border-line bg-slate-50 px-4 py-3 text-sm font-semibold text-ink">接口明细计次</p><div class="interface-detail-scroll"><table class="data-table w-full border-collapse" style="min-width:1560px"><thead><tr><th>序号</th><th>工具</th><th>CLI 命令</th><th>参数摘要</th><th>缓存状态</th><th>消耗次数</th><th>剩余次数</th><th>响应文件</th><th>原文件</th><th>调用时间</th><th>运行耗时</th></tr></thead><tbody>${interfaceDetailRows(audit)}</tbody></table></div></div>`)}</main></div></div><script>window.REPORT_DATA=${jsData};${exactChartJs()}if(window.lucide){lucide.createIcons();}</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ASIN 竞品监控报告</title><script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script><style>${exactCss()}</style></head><body><div class="report-watermark" aria-hidden="true"></div><div class="min-h-screen"><header class="report-header sticky top-0 z-40 border-b border-line bg-white/92 backdrop-blur no-print"><div class="mx-auto flex max-w-[1500px] items-center justify-between gap-4 px-5 py-3"><div class="flex min-w-0 items-center gap-3"><div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-ink text-white"><i data-lucide="activity" class="h-5 w-5"></i></div><div class="min-w-0"><p class="truncate text-sm font-semibold text-ink">Amazon 竞品监控报告工具 by kong</p><p class="truncate text-xs text-muted">${esc(d.meta.marketplace)} ｜ 快照：${esc(d.meta.report_date)} ｜ Sorftime CLI + 本地快照差异</p></div></div><span class="rounded-full border border-line bg-white px-3 py-1 text-xs text-muted">${d.meta.demo_mode ? '演示模式' : '真实请求'}</span></div></header><div class="report-layout mx-auto grid max-w-[1500px] grid-cols-1 gap-5 px-5 py-5 lg:grid-cols-[280px_minmax(0,1fr)]"><aside class="no-print hidden lg:block"><nav class="sticky-nav sticky top-[76px] max-h-[calc(100vh-96px)] overflow-y-auto rounded-lg border border-line bg-white p-3 shadow-panel"><p class="px-3 pb-2 text-xs font-bold uppercase tracking-wide text-muted">监控目录</p><div class="space-y-3"><div><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-slate-400"><i data-lucide="layout-dashboard" class="h-3.5 w-3.5"></i>总览</p><a href="#overview" aria-current="true">今日总览</a><a href="#event-board">变化概览</a><a href="#actions">处理建议</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="boxes" class="h-3.5 w-3.5"></i>监控对象</p><a href="#watch-wall">ASIN 监控概览</a><a href="#asin-table">ASIN 明细表</a><a href="#comparison">自有 vs 竞品</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="line-chart" class="h-3.5 w-3.5"></i>证据</p><a href="#trends">趋势证据</a><a href="#keywords">关键词表现</a><a href="#reviews">评论 VOC</a></div><div class="border-t border-line pt-3"><p class="mb-1 flex items-center gap-2 px-3 text-xs font-bold text-brand"><i data-lucide="shield-check" class="h-3.5 w-3.5"></i>审计</p><a href="#method">数据口径</a><a href="#interface-audit">接口审计</a></div></div><div class="mt-4 rounded-md bg-slate-50 p-3 text-xs leading-5 text-muted"><b class="text-ink">阅读主线</b><br>先看竞品今天变了什么，再看自有输赢在哪，最后落到今天要复核或处理的事项。</div></nav></aside><main class="space-y-5"><section id="overview" class="overflow-hidden rounded-lg border border-line bg-white shadow-panel"><div class="grid gap-0 xl:grid-cols-[1.1fr_0.9fr]"><div class="p-7"><div class="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700"><i data-lucide="radar" class="h-4 w-4"></i>${esc(d.meta.marketplace)} · ASIN 竞品监控</div><h1 class="hero-title max-w-4xl text-ink">Amazon 竞品监控报告工具 by kong</h1><p class="hero-copy mt-4 max-w-3xl text-muted">复刻 Jax 丰哥在跨境写代码的 ASIN 竞品监控报告框架。输入 CLI Token、自有 ASIN、竞品 ASIN 和关键词后，自动采集 Sorftime 数据并形成同版式监控报告。</p><p class="mt-3 text-sm"><a class="text-brand hover:underline" href="http://mp.weixin.qq.com/s?__biz=MzY5MTMyNTQ3Mg==&mid=2247483693&idx=1&sn=439089733fc16d941b2f413ab5c33453&chksm=f525c7bd3ba225a68fd0636cb24b43d67ce2a374315b5a9ecd43dc16baca5953332b9626109b&scene=126&sessionid=1782973447&subscene=227&clicktime=1782973450&enterid=1782973450#rd" target="_blank" rel="noopener">查看原文章：Jax 丰哥在跨境写代码</a></p><div class="mt-6 grid gap-3 md:grid-cols-4 xl:grid-cols-2">${metricCard('待处理事项', `${d.summary.opportunity_count} 项`, 'P0/P1/P2')}${metricCard('风险事件', `${riskEvents.length} 个`, '需复核原因')}${metricCard('机会事件', `${oppEvents.length} 个`, '需结合业务确认')}${metricCard('监控状态', d.meta.demo_mode ? '演示' : '真实', '基于当前快照判断')}</div><div class="mt-5 grid gap-4 md:grid-cols-2"><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">监控范围</p><p class="mt-1 text-sm leading-6 text-muted">${d.input.own_asins.length} 个自有 ASIN，${d.input.competitor_asins.length} 个竞品 ASIN，快照日期 ${esc(d.meta.report_date)}。</p></div><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">当前状态</p><p class="mt-1 text-sm leading-6 text-muted">报告来自 ${d.meta.demo_mode ? '演示数据' : 'Sorftime CLI 真实请求'}，接口消耗 ${d.summary.total_request_consumed || '-'} 次，CLI 运行 ${fmtMs(d.summary.total_duration_ms)}。</p></div></div></div><div class="bg-ink p-7 text-white"><p class="text-xs font-bold uppercase tracking-wide text-emerald-300">今日处理</p><h2 class="mt-1 text-2xl font-semibold">优先复核事项</h2><p class="mt-3 text-sm leading-6 text-slate-300">建议结合库存、广告、订单和利润数据复核；本页只回答竞品监控层面的变化与差距。</p><div class="mt-5 space-y-3">${heroActions || '<div class="rounded-lg border border-slate-700 bg-slate-900 p-4 text-slate-300">暂无优先复核事项</div>'}</div></div></div></section>${sectionShell('event-board','01 变化概览','今日变化概览','以下事件由当前快照与最近一次历史快照比对生成。首次基线仅记录纳入监控，不代表竞品发生实际变化。', `<div class="mt-5 grid gap-4 md:grid-cols-5">${eventColumns}</div>`)}${sectionShell('watch-wall','02 ASIN 概览','ASIN 监控概览','按 ASIN 汇总当前价格、BSR、估算销量、评分、评论和关键词覆盖，便于快速查看自有产品与竞品状态。主图来自 Sorftime CLI 返回的真实商品图，点击可放大。', `<div class="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">${watchCards}</div>`)}${sectionShell('actions','03 处理建议','处理建议','将变化事件转成运营动作，便于今天直接复核。', tableBlock(['优先级','动作类型','对象','触发原因','建议动作'], actionRows, 980))}${sectionShell('asin-table','04 ASIN 明细','ASIN 监控列表','汇总自有与竞品的当前状态，包括价格、BSR、估算销量、评分评论、关键词和 Listing 资产。', tableBlock(['主图','角色','ASIN','品牌','价格','促销折扣','BSR','估算销量','评分','Rating','Review','流量词','广告词','卖家数','A+','视频','标签'], asinRows, 1680))}${sectionShell('comparison','05 对比分析','自有 ASIN vs 竞品','从价格、销量、BSR、评分和关键词覆盖等维度对比自有 ASIN 与竞品差距。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('价格带对比','priceBandCompareChart','horizontal_bar','截面图，按当前标价排序；多件促销不折算为单件到手价。')}${chartCard('估算月销量对比','salesVolumeCompareChart','horizontal_bar','销量为 Sorftime 估算口径，不等同于 Amazon 后台真实订单。')}${chartCard('BSR 截面对比','bsrSnapshotCompareChart','horizontal_bar','BSR 越小越好；排序按当前 BSR 从优到弱排列。')}${chartCard('促销折扣比例','couponDiscountCompareChart','horizontal_bar','仅展示百分比促销；金额券或多件条件不会被换算成单件到手价。')}${chartCard('Listing 资产覆盖','listingAssetCoverageChart','bar','A+=35 分、视频=25 分、每个变体 4 分封顶 40 分。')}${chartCard('Buybox / 卖家数对比','buyboxSellerCompareChart','bar','卖家数用于监控 Buybox 稳定性。')}${chartCard('口碑壁垒散点','ratingReviewMoatChart','scatter','右上代表评论厚度与评分同时较强。')}</div>${tableBlock(['自有 ASIN','竞品 ASIN','价格差','销量差','BSR 差','评分差','流量词差','竞品标签'], compareRowsExact, 1120)}<p class="mt-2 text-xs text-muted">价格差、销量差、流量词差均为竞品减自有；BSR 差为数值差，越小通常越好。</p>`)}${sectionShell('trends','06 趋势证据','趋势与事件','优先使用 Sorftime ProductRequest trend=1 的近 15 天趋势；缺失时回退到本地每日快照。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('价格趋势','priceTrendChart','line','来自 Sorftime ProductRequest trend=1 返回的近 15 天价格趋势；缺失点为空。')}${chartCard('BSR 趋势','bsrTrendChart','line','Y 轴已反转，越靠上排名越好。')}${chartCard('估算日销量趋势','salesTrendChart','line','销量为估算口径，不等同于真实订单。')}${chartCard('评分趋势','ratingTrendChart','line','真实趋势不足时按当前快照生成确定性序列。')}${chartCard('Review 数趋势','reviewTrendChart','line','用于观察口碑厚度增长。')}${chartCard('今日事件结构','eventStructureChart','pie','按风险、机会、记录三类聚合今日事件。')}</div>${tableBlock(['角色','ASIN','趋势区间','价格首尾','价格变化','BSR 首尾','BSR 变化','估算日销量首尾','估算日销量变化'], trendRows(d), 1180)}${tableBlock(['日期','严重度','方向','角色','ASIN','类型','事件摘要'], trendEventRows, 1180)}`)}${sectionShell('keywords','07 关键词表现','关键词表现','汇总 ASIN 级关键词覆盖、竞品覆盖但自有缺失的词，以及核心词搜索漏斗近似。', `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('关键词覆盖对比','keywordCoverageCompareChart','bar','来自 ASINRequestKeywordv2 聚合；自然词按 SearchPosition 非空近似，广告词按 AdPosition 非空近似。')}${chartCard('关键词机会矩阵','keywordOpportunityMatrixChart','scatter','高搜索量且排名偏后的词优先复核广告与 Listing 覆盖。')}${chartCard('核心词 SOV 近似','keywordSovApproxChart','horizontal_bar','近似 SOV：用 ASIN 关键词自然位/广告位覆盖占比估算。')}</div>${tableBlock(['角色','ASIN','全部流量词','自然词','广告词','关联流量份额'], keywordCoverageRows(d.asin_snapshots), 1120)}${tableBlock(['关键词','覆盖竞品数','判断','建议'], keywordMissingRows(d), 1120)}${tableBlock(['关键词','搜索量','CPC','商品数','供需近似','来源'], keywordMetricRows(d), 1120)}`)}${sectionShell('reviews','08 评论 VOC','评论与 VOC','基于评论样本归纳好评主题、差评主题和产品改进线索。', `${tableBlock(['ASIN','1星占比','2星占比','3星占比','4星占比','5星占比'], reviewDistributionRows(d), 1040)}${tableBlock(['方向','归纳点','提及评论数','代表评论'], vocTopicRows(d), 1040)}${tableBlock(['ASIN','星级','标题','内容摘要','标识'], reviewSampleRows, 1040)}`)}${sectionShell('method','09 数据口径','数据口径','本报告基于 Sorftime CLI 响应和本地每日快照生成。销量、销售额、BSR、关键词和评论均以第三方口径为准，不等同于 Amazon 后台真实订单、广告或利润数据。', `<div class="mt-5 grid gap-4 md:grid-cols-2"><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">当前快照</p><p class="mt-1 text-sm leading-6 text-muted">价格、促销折扣、BSR、评分评论、Listing 资产、卖家数和关键词覆盖来自当日采集；多件促销不会被折算为单件到手价。</p></div><div class="rounded-lg border border-line bg-slate-50 text-ink p-4"><p class="text-sm font-bold">关键词 CPC</p><p class="mt-1 text-sm leading-6 text-muted">CPC 使用关键词接口原始字段；整数大于等于 20 时按美分口径换算为美元，并在数据里保留 cpc_raw 和 cpc_note。</p></div></div>`)}${sectionShell('interface-audit','10 接口审计','Sorftime CLI 接口审计','记录本次报告涉及的 Sorftime CLI 请求、缓存状态、消耗次数和调用时间，便于复核数据来源。', `<div class="mt-5 interface-metric-grid">${metricCard('已记录调用', `${audit.length} 次`, 'manifest.requests')}${metricCard('真实请求', `${audit.filter(a => a.ok).length} 次`, 'PAID_REQUEST')}${metricCard('消耗次数', d.summary.total_request_consumed || '-', 'requestConsumed')}${metricCard('失败请求', `${d.summary.failed_calls} 次`, 'FAILED')}</div><div class="mt-5 interface-audit-grid"><div class="rounded-lg border border-line bg-white p-4"><p class="text-sm font-semibold text-ink">接口调用计次</p><div id="interfaceAuditChart" class="chart mt-3"></div><p class="mt-2 text-xs text-muted">按 Sorftime 逻辑工具统计，每次 CLI 调用都会计入。</p></div><div class="interface-summary-table overflow-auto rounded-lg border border-line"><table class="data-table w-full border-collapse" style="min-width:560px"><thead><tr><th>工具</th><th>次数</th></tr></thead><tbody>${interfaceSummaryRows(audit)}</tbody></table></div></div><div class="mt-4 rounded-lg border border-line"><p class="border-b border-line bg-slate-50 px-4 py-3 text-sm font-semibold text-ink">接口明细计次</p><div class="interface-detail-scroll"><table class="data-table w-full border-collapse" style="min-width:1560px"><thead><tr><th>序号</th><th>工具</th><th>CLI 命令</th><th>参数摘要</th><th>缓存状态</th><th>消耗次数</th><th>剩余次数</th><th>响应文件</th><th>原文件</th><th>调用时间</th><th>运行耗时</th></tr></thead><tbody>${interfaceDetailRows(audit)}</tbody></table></div></div>`)}</main></div></div><script>window.REPORT_DATA=${jsData};${exactChartJs()}if(window.lucide){lucide.createIcons();}</script></body></html>`;
 }
 
 function renderMarkdown(d) {
@@ -1297,14 +1375,15 @@ function exactChartJs() { return `(() => {
 const d=window.REPORT_DATA||{};const ps=d.asin_snapshots||[];const trends=d.trends||[];const events=d.events||[];const audit=d.request_audit||[];const reviews=d.review_voc||[];
 const money=v=>v==null?0:Number(v)||0;const label=p=>(p.role==='own'?'自有 ':'竞品 ')+p.asin+(p.brand?' · '+p.brand:'');
 const watchGrid=document.querySelector('#watch-wall .grid');if(watchGrid){watchGrid.style.gridTemplateColumns='repeat('+Math.min(Math.max(ps.length,1),3)+',minmax(0,1fr))';watchGrid.style.width='100%';}document.querySelectorAll('#watch-wall .asin-card-metrics').forEach(g=>{g.style.gridTemplateColumns='repeat(3,minmax(0,1fr))';g.style.gap='10px';});document.querySelectorAll('#watch-wall .asin-card-metrics>div').forEach(c=>{c.style.minHeight='96px';c.style.padding='16px';});
-const couponAfter=p=>p.coupon_after_price!=null?money(p.coupon_after_price):money(p.price);
+const couponAfter=p=>money(p.price);
+const promotionPct=p=>{const text=String(p.coupon||'');const m=text.match(/(\\d+(?:\\.\\d+)?)\\s*%/);return m?Number(Number(m[1]).toFixed(1)):0;};
 const asset=p=>(p.has_aplus?35:0)+(p.has_video?25:0)+Math.min(40,(Number(p.variation_count)||0)*4);
 function chart(id,opt){const el=document.getElementById(id);if(!el||!window.echarts)return;echarts.init(el).setOption(opt);}
 function hbar(id,name,values,unit=''){chart(id,{tooltip:{trigger:'axis',valueFormatter:v=>unit?String(v)+unit:v},legend:{top:0},grid:{left:132,right:18,top:34,bottom:22},xAxis:{type:'value'},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:[{name,type:'bar',data:values,itemStyle:{color:'#047857'}}]});}
-hbar('priceBandCompareChart','当前价格/券后价',ps.map(p=>couponAfter(p)),'$');
+hbar('priceBandCompareChart','当前标价',ps.map(p=>couponAfter(p)),'$');
 hbar('salesVolumeCompareChart','估算月销量',ps.map(p=>money(p.monthly_sales)),'件');
 hbar('bsrSnapshotCompareChart','小类 BSR',ps.map(p=>money(p.bsr)),'位');
-hbar('couponDiscountCompareChart','到手价折扣',ps.map(p=>{const price=money(p.price);return price?+((price-couponAfter(p))/price*100).toFixed(1):0}),'%');
+hbar('couponDiscountCompareChart','促销折扣比例',ps.map(p=>promotionPct(p)),'%');
 chart('listingAssetCoverageChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:45,right:12,top:44,bottom:58},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25,width:82,overflow:'truncate'}},yAxis:{type:'value',max:100},series:[{name:'Listing资产分',type:'bar',data:ps.map(asset),itemStyle:{color:'#0f766e'}}]});
 chart('buyboxSellerCompareChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:45,right:12,top:44,bottom:58},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25,width:82,overflow:'truncate'}},yAxis:{type:'value'},series:[{name:'卖家数',type:'bar',data:ps.map(p=>money(p.seller_count)),itemStyle:{color:'#2563eb'}}]});
 chart('ratingReviewMoatChart',{tooltip:{formatter:p=>{const v=p.value;return v[3]+'<br/>Review 数：'+v[0]+'<br/>评分：'+v[1]}},legend:{top:0},grid:{left:58,right:24,top:42,bottom:42},xAxis:{name:'Review 数',type:'value'},yAxis:{name:'评分',type:'value',min:0,max:5},series:[{name:'ASIN：Review 数 × 评分',type:'scatter',symbolSize:v=>Math.max(10,Math.min(42,Math.sqrt(v[2]||1))),label:{show:true,formatter:p=>p.value[3],position:'right',fontSize:10},data:ps.map(p=>[money(p.review_count),money(p.rating),money(p.review_count),p.asin]),itemStyle:{color:'#7c3aed'}}]});
