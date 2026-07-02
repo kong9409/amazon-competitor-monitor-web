@@ -239,6 +239,28 @@ function couponText(v) {
   return text;
 }
 
+function promotionText(product) {
+  const promo = findAny(product, [
+    'coupon', 'Coupon', 'couponText', 'couponValue', 'DealType', 'ExtraSavings',
+    'primeDiscount', 'PrimeDiscount', 'primeExclusiveDiscount', 'PrimeExclusiveDiscount',
+    'promotion', 'Promotion', 'promotionText', 'PromotionText', 'promo', 'Promo',
+    'brandPromotion', 'BrandPromotion', 'code', 'Code', 'promoCode', 'PromoCode',
+    'dealBadge', 'DealBadge', 'savingBasis', 'SavingBasis'
+  ], { scalarOnly: false });
+  return couponText(promo);
+}
+
+function promotionPrice(product) {
+  const value = findVal(product, [
+    'couponPrice', 'CouponPrice', 'couponAfterPrice', 'CouponAfterPrice',
+    'finalPrice', 'FinalPrice', 'discountPrice', 'DiscountPrice',
+    'primePrice', 'PrimePrice', 'primeExclusivePrice', 'PrimeExclusivePrice',
+    'promotionPrice', 'PromotionPrice', 'codePrice', 'CodePrice',
+    'dealPrice', 'DealPrice', 'lightningDealPrice', 'LightningDealPrice'
+  ]);
+  return priceNum(value);
+}
+
 function firstPhoto(obj) {
   const image = findVal(obj, ['image', 'mainImage', 'imageUrl', 'imgUrl']);
   if (image) return image;
@@ -247,13 +269,14 @@ function firstPhoto(obj) {
 }
 
 function extractBsr(obj) {
-  const direct = num(findVal(obj, ['rank', 'Rank', 'salesRank', 'SalesRank', 'bestSellerRank', 'bsr']));
-  if (direct !== null) return direct;
   const bsr = findAny(obj, ['bsrCategory', 'BsrCategory'], { scalarOnly: false });
   if (Array.isArray(bsr)) {
-    const first = Array.isArray(bsr[0]) ? bsr[0] : bsr;
-    return num(first?.[2] ?? first?.rank ?? first?.Rank);
+    const rows = Array.isArray(bsr[0]) || typeof bsr[0] === 'object' ? bsr : [bsr];
+    const ranks = rows.map(row => num(row?.[2] ?? row?.rank ?? row?.Rank ?? row?.salesRank ?? row?.SalesRank)).filter(v => v !== null);
+    if (ranks.length) return ranks[0];
   }
+  const direct = num(findVal(obj, ['smallCategoryRank', 'SmallCategoryRank', 'bsr', 'rank', 'Rank', 'salesRank', 'SalesRank', 'bestSellerRank']));
+  if (direct !== null) return direct;
   return null;
 }
 
@@ -271,11 +294,24 @@ function productReviewCount(obj) {
 }
 
 function latestMonthlySales(raw) {
-  const rows = firstArray(raw, ['data', 'Data', 'records', 'Records']);
+  const direct = responseMetric(raw, [
+    'ListingSalesVolumeOfMonth', 'listingSalesVolumeOfMonth',
+    'monthlySales', 'MonthlySales', 'monthSales', 'MonthSales',
+    'salesVolumeOfMonth', 'SalesVolumeOfMonth', 'AsinSalesCount'
+  ]);
+  if (direct !== null) return direct;
+  const rows = firstArray(raw, ['data', 'Data', 'records', 'Records', 'sales', 'Sales', 'list', 'List']);
   const monthly = rows
-    .filter(r => Array.isArray(r) && num(r[1]) !== null && (num(r[2]) === 2 || String(r[2] || '').includes('月')))
+    .filter(r => Array.isArray(r) && num(r[1]) !== null && (num(r[2]) === 2 || String(r[2] || '').includes('月') || String(r[2] || '').toLowerCase().includes('month')))
     .sort((a, b) => String(b[0]).localeCompare(String(a[0])));
-  return monthly.length ? num(monthly[0][1]) : null;
+  if (monthly.length) return num(monthly[0][1]);
+  const numericRows = rows.filter(r => Array.isArray(r) && num(r[1]) !== null).sort((a, b) => String(b[0]).localeCompare(String(a[0])));
+  return numericRows.length ? num(numericRows[0][1]) : null;
+}
+
+function parentAsinFromRaw(raw, asin) {
+  const product = firstProduct(raw, asin);
+  return safeAsin(findVal(product, ['parentAsin', 'ParentAsin', 'ParentASIN', 'parentASIN', 'Parent', 'parent']));
 }
 
 function productParams(interfaceName, asin) {
@@ -298,7 +334,7 @@ function keywordParams(interfaceName, asin, keyword, marketplace) {
 function keywordMetricParams(interfaceName, keyword) {
   if (/^KeywordRequest$/i.test(interfaceName)) return { keyword };
   if (/^KeywordQuery$/i.test(interfaceName)) return { pattern: { keyword }, pageIndex: 1, pageSize: 20 };
-  if (/^KeywordExtends$/i.test(interfaceName)) return { keyword, pageIndex: 1, pageSize: 20 };
+  if (/^KeywordExtends$/i.test(interfaceName)) return { keyword, pageSize: 100 };
   return { keyword };
 }
 
@@ -382,11 +418,13 @@ function normalizeProduct(asin, role, raw, salesRaw = {}) {
   const product = firstProduct(raw, asin);
   const title = findVal(product, ['title', 'Title', 'productTitle', 'name', 'productName']) || '';
   const price = findVal(product, ['salesPrice', 'SalesPrice', 'price', 'Price', 'currentPrice', 'buyboxPrice', 'salePrice']);
-  const coupon = findAny(product, ['coupon', 'Coupon', 'couponText', 'couponValue', 'DealType', 'ExtraSavings'], { scalarOnly: false }) ?? findVal(product, ['coupon', 'Coupon', 'couponText', 'couponValue', 'DealType']);
+  const coupon = promotionText(product);
+  const couponAfter = promotionPrice(product);
   const monthlySales = latestMonthlySales(salesRaw) ?? findVal(product, ['listingSalesVolumeOfMonth', 'ListingSalesVolumeOfMonth', 'AsinSalesCount', 'monthlySales', 'estimatedSales', 'monthSales']);
   const revenue = findVal(product, ['listingSalesOfMonth', 'ListingSalesOfMonth', 'revenue', 'salesAmount', 'monthlyRevenue']);
   const brand = findVal(product, ['brand', 'Brand', 'brandName']);
   const image = firstPhoto(product);
+  const parentAsin = parentAsinFromRaw(raw, asin);
   const seller = findVal(product, ['buyboxSeller', 'BuyboxSeller', 'sellerName', 'SellerName', 'StoreName']);
   const sellerId = findVal(product, ['buyboxSellerId', 'BuyboxSellerId', 'sellerId', 'SellerId']);
   const sellerCount = findVal(product, ['sellerCount', 'SellerCount']);
@@ -399,7 +437,10 @@ function normalizeProduct(asin, role, raw, salesRaw = {}) {
     title: cleanText(title, 180),
     brand: cleanText(brand, 60),
     price: priceNum(price),
+    coupon_after_price: couponAfter,
+    parent_asin: parentAsin || '',
     rating: productRating(product),
+    rating_count: num(findVal(product, ['ratingCount', 'RatingCount', 'ratingsTotal', 'RatingsTotal'])) || null,
     review_count: productReviewCount(product),
     bsr: extractBsr(product),
     coupon: couponText(coupon),
@@ -463,15 +504,39 @@ function normalizeKeyword(raw, asin, keyword, metricRaw = {}) {
   };
 }
 
+function normalizeKeywordMetrics(raw, seedKeyword, source) {
+  const rows = firstArray(raw, ['records', 'Records', 'keywords', 'Keywords', 'KeywordExtends', 'keywordExtends', 'list', 'List', 'data', 'Data']);
+  const sourceName = source || 'KeywordExtends';
+  const mapped = rows.map(row => {
+    const keyword = cleanText(findVal(row, ['keyword', 'Keyword', 'name', 'Name', 'word', 'Word', 'term', 'Term']) || seedKeyword, 160);
+    return {
+      keyword,
+      search_volume: num(findVal(row, ['searchVolume', 'SearchVolume', 'volume', 'keywordSearches', 'Searches', 'searches'])) || null,
+      cpc: priceNum(findVal(row, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid'])) || null,
+      product_count: num(findVal(row, ['ProductsTotal', 'productsTotal', 'productCount', 'ProductCount', 'goodsNum', 'GoodsNum', 'competitorCount'])) || null,
+      source: sourceName
+    };
+  }).filter(r => r.keyword);
+  if (mapped.length) return mapped;
+  const data = unwrapData(raw);
+  return [{
+    keyword: seedKeyword,
+    search_volume: num(findVal(data, ['searchVolume', 'SearchVolume', 'volume', 'keywordSearches', 'Searches', 'searches'])) || null,
+    cpc: priceNum(findVal(data, ['CPC', 'cpc', 'Bid', 'bid', 'PPCBid', 'ppcBid'])) || null,
+    product_count: num(findVal(data, ['ProductsTotal', 'productsTotal', 'productCount', 'ProductCount', 'goodsNum', 'GoodsNum', 'competitorCount'])) || null,
+    source: sourceName
+  }];
+}
+
 function normalizeReviews(raw, asin) {
   const arr = firstArray(raw, ['reviews', 'Reviews', 'records', 'Records', 'list', 'List', 'data', 'Data']);
-  return arr.slice(0, 12).map(r => ({
+  return arr.slice(0, 50).map(r => ({
     asin,
-    star: num(findVal(r, ['star', 'Star', 'rating'])) || null,
-    date: cleanText(findVal(r, ['reviewsDate', 'reviewDate', 'date']), 30),
-    title: cleanText(findVal(r, ['title', 'reviewTitle']), 100),
-    body: cleanText(findVal(r, ['body', 'content', 'text', 'reviewContent']), 240),
-    vp: Boolean(findVal(r, ['isVP', 'verified', 'vp', 'verifiedPurchase']))
+    star: num(findVal(r, ['star', 'Star', 'rating', 'Rating', 'score', 'Score'])) || null,
+    date: cleanText(findVal(r, ['reviewsDate', 'reviewDate', 'date', 'Date', 'createdAt', 'CreatedAt']), 30),
+    title: cleanText(findVal(r, ['title', 'Title', 'reviewTitle', 'ReviewTitle', 'subject']), 100),
+    body: cleanText(findVal(r, ['body', 'Body', 'content', 'Content', 'text', 'Text', 'reviewContent', 'ReviewContent']), 360),
+    vp: boolFlag(findVal(r, ['isVP', 'verified', 'vp', 'verifiedPurchase', 'VerifiedPurchase']))
   })).filter(r => r.title || r.body || r.star);
 }
 
@@ -482,7 +547,10 @@ function demoProduct(asin, role, i) {
     title: role === 'own' ? 'Demo Own Product - Amazon Listing' : `Demo Competitor Product ${i + 1}`,
     brand: role === 'own' ? 'Your Brand' : `Competitor ${i + 1}`,
     price: Number(base.toFixed(2)),
+    coupon_after_price: Number((base * (i % 2 ? 0.9 : 1)).toFixed(2)),
+    parent_asin: asin,
     rating: Number((4.1 + (i % 3) * 0.2).toFixed(1)),
+    rating_count: null,
     review_count: 120 + i * 85,
     bsr: 9000 - i * 1300,
     coupon: i % 2 ? '10% Coupon' : '',
@@ -503,12 +571,12 @@ function demoProduct(asin, role, i) {
   };
 }
 
-function trendFor(asin, metric, base) {
+function trendFor(asin, metric, base, options = {}) {
   return Array.from({ length: 14 }, (_, i) => ({
     date: new Date(Date.now() - (13 - i) * 86400000).toISOString().slice(5, 10),
     asin,
     metric,
-    value: Math.max(0, Math.round(base + Math.sin(i / 2) * base * 0.08 + (Math.random() - .5) * base * .04))
+    value: Math.max(0, Number((base + Math.sin(i / 2) * base * (options.swing ?? 0.08)).toFixed(options.decimals ?? 0)))
   }));
 }
 
@@ -621,6 +689,7 @@ async function generateReport(input) {
 
   const products = [];
   const keywordRows = [];
+  const keywordMetricRowsData = [];
   let reviews = [];
   const productByAsin = new Map();
   const salesByAsin = new Map();
@@ -629,6 +698,7 @@ async function generateReport(input) {
   if (demoMode) {
     allAsins.forEach((x, i) => products.push(demoProduct(x.asin, x.role, i)));
     for (const asinObj of allAsins) for (const [i, kw] of coreKeywords.entries()) keywordRows.push({ asin: asinObj.asin, keyword: kw, organic_rank: asinObj.role === 'own' ? 8 + i * 9 : 4 + i * 3, ad_rank: i + 1, search_volume: 1200 + i * 800, purchase_rate: Number((2.3 + i * .4).toFixed(1)) });
+    for (const [i, kw] of coreKeywords.entries()) keywordMetricRowsData.push({ keyword: kw, search_volume: 1200 + i * 800, cpc: 0.8 + i * 0.2, product_count: 5000 + i * 1000, source: 'Demo' });
     reviews = [{ asin: ownAsins[0], star: 2, date: today(), title: 'Demo negative review', body: 'Customer mentions heat, installation, missing parts. Use as VOC example.', vp: true }];
   } else {
     const batchParams = productBatchParams(interfaces.product, allAsins.map(x => x.asin));
@@ -651,7 +721,9 @@ async function generateReport(input) {
         await sleep(200);
       }
 
-      const salesCallParams = salesParams(interfaces.sales, item.asin);
+      const parentAsin = parentAsinFromRaw(productByAsin.get(item.asin) || {}, item.asin);
+      const salesAsin = parentAsin || item.asin;
+      const salesCallParams = salesParams(interfaces.sales, salesAsin);
       const sr = await callSorftime({ interfaceName: interfaces.sales, params: salesCallParams, domain, token, timeoutMs: 90000 });
       await fs.writeFile(path.join(rawDir, `${item.asin}_${interfaces.sales}.json`), JSON.stringify(sr.data, null, 2));
       audit.push(auditRecord(sr, interfaces.sales, salesCallParams, domain));
@@ -687,6 +759,7 @@ async function generateReport(input) {
       await fs.writeFile(path.join(rawDir, `keyword_${kw.replace(/[^a-z0-9]+/gi,'_')}_${interfaces.keywordMetric}.json`), JSON.stringify(km.data, null, 2));
       audit.push(auditRecord(km, interfaces.keywordMetric, params, domain));
       keywordMetrics.set(kw, km.data);
+      keywordMetricRowsData.push(...normalizeKeywordMetrics(km.data, kw, interfaces.keywordMetric));
       await sleep(150);
     }
 
@@ -705,10 +778,10 @@ async function generateReport(input) {
   const events = buildEvents(products, keywordRows);
   const actions = buildActions(events);
   const trends = products.flatMap(p => [
-    ...trendFor(p.asin, 'price', p.price || 30),
+    ...trendFor(p.asin, 'price', p.price || 30, { decimals: 2, swing: 0.015 }),
     ...trendFor(p.asin, 'bsr', p.bsr || 8000),
-    ...trendFor(p.asin, 'sales', p.monthly_sales || 300),
-    ...trendFor(p.asin, 'rating', (p.rating || 4.5) * 10).map(x => ({ ...x, value: Number((x.value / 10).toFixed(1)) })),
+    ...trendFor(p.asin, 'sales_daily', (p.monthly_sales || 0) / 30, { decimals: 0, swing: 0.12 }),
+    ...trendFor(p.asin, 'rating', p.rating || 4.5, { decimals: 1, swing: 0.004 }),
     ...trendFor(p.asin, 'review', p.review_count || 100)
   ]);
   const totalDurationMs = audit.reduce((sum, a) => sum + (num(a.duration_ms) || 0), 0);
@@ -729,6 +802,7 @@ async function generateReport(input) {
     },
     asin_snapshots: products,
     keyword_gap: keywordRows,
+    keyword_metrics: keywordMetricRowsData,
     review_voc: reviews,
     trends,
     events,
@@ -802,6 +876,7 @@ function asinUrl(asin) {
 }
 
 function couponAfterPrice(p) {
+  if (p.coupon_after_price !== null && p.coupon_after_price !== undefined) return p.coupon_after_price;
   const price = num(p.price);
   if (price === null) return null;
   const text = cleanText(p.coupon, 80);
@@ -810,6 +885,18 @@ function couponAfterPrice(p) {
   const off = text.match(/\$?\s*(\d+(?:\.\d+)?)/);
   if (off && /off|coupon|\$/i.test(text)) return Math.max(0, Number((price - Number(off[1])).toFixed(2)));
   return price;
+}
+
+function hasPromotion(p) {
+  const price = num(p.price);
+  const after = couponAfterPrice(p);
+  return Boolean(p.coupon) || (price !== null && after !== null && after < price);
+}
+
+function couponAfterDisplay(p) {
+  if (!hasPromotion(p)) return '无促销';
+  const after = couponAfterPrice(p);
+  return after === null ? esc(p.coupon || '有促销') : fmtMoney(after);
 }
 
 function productTag(p) {
@@ -864,7 +951,7 @@ function trendRows(d) {
     };
     const price = summarize('price', fmtMoney);
     const bsr = summarize('bsr', fmtNum);
-    const sales = summarize('sales', fmtNum);
+    const sales = summarize('sales_daily', fmtNum);
     return `<tr><td>${roleLabel(p.role)}</td><td><strong class="metric-emphasis">${esc(p.asin)}</strong></td><td>${price.range}</td><td>${price.firstLast}</td><td>${price.change}</td><td>${bsr.firstLast}</td><td>${bsr.change}</td><td>${sales.firstLast}</td><td>${sales.change}</td></tr>`;
   }).join('');
 }
@@ -889,6 +976,12 @@ function keywordMissingRows(d) {
 function keywordMetricRows(d) {
   const rows = [];
   const seen = new Set();
+  for (const k of d.keyword_metrics || []) {
+    if (!k.keyword || seen.has(k.keyword)) continue;
+    seen.add(k.keyword);
+    const supply = k.search_volume && k.product_count ? Number((k.search_volume / Math.max(1, k.product_count)).toFixed(2)) : '-';
+    rows.push(`<tr><td>${esc(k.keyword)}</td><td><strong class="metric-emphasis">${fmtNum(k.search_volume)}</strong></td><td>${k.cpc ? fmtMoney(k.cpc) : '-'}</td><td>${fmtNum(k.product_count)}</td><td>${supply}</td><td>${esc(k.source || d.input.interfaces.keywordMetric || 'KeywordExtends')}</td></tr>`);
+  }
   for (const k of d.keyword_gap || []) {
     if (seen.has(k.keyword)) continue;
     seen.add(k.keyword);
@@ -966,11 +1059,14 @@ function tableBlock(headers, rows, minWidth = 1120) {
 }
 
 function metricCard(label, value, sub = '') {
-  return `<div class="rounded-lg border border-line bg-slate-50 p-4"><p class="text-xs font-semibold text-muted">${label}</p><p class="metric-value mt-2"><span class="metric-number">${value}</span></p><p class="mt-1 text-xs text-muted">${sub}</p></div>`;
+  return `<div class="rounded-lg border border-line bg-slate-50 p-4" style="min-width:0;overflow:hidden"><p class="text-xs font-semibold text-muted">${label}</p><p class="metric-value mt-2"><span class="metric-number" style="display:block;font-size:clamp(18px,2.2vw,28px);line-height:1.08;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">${value}</span></p><p class="mt-1 text-xs text-muted">${sub}</p></div>`;
 }
 
 function sectionShell(id, kicker, title, desc, inner) {
-  return `<section id="${id}" class="rounded-lg border border-line bg-white p-6 shadow-panel"><p class="text-xs font-bold uppercase tracking-wide text-brand">${kicker}</p><h2 class="mt-1 text-2xl font-semibold text-ink">${title}</h2><p class="mt-2 text-sm leading-6 text-muted">${desc}</p>${inner}</section>`;
+  const extra = id === 'reviews'
+    ? `<div class="mt-5 grid gap-4 md:grid-cols-2">${chartCard('星级分布','ratingDistributionChart','horizontal_bar','来自已采集评论样本；无评论样本时显示为空。')}${chartCard('评论主题提及','reviewTopicMentionChart','horizontal_bar','提及次数仅统计已采集评论样本中的规则命中，不外推为整体评论分布。')}</div>`
+    : '';
+  return `<section id="${id}" class="rounded-lg border border-line bg-white p-6 shadow-panel"><p class="text-xs font-bold uppercase tracking-wide text-brand">${kicker}</p><h2 class="mt-1 text-2xl font-semibold text-ink">${title}</h2><p class="mt-2 text-sm leading-6 text-muted">${desc}</p>${extra}${inner}</section>`;
 }
 
 function renderExactHtml(d) {
@@ -988,7 +1084,7 @@ function renderExactHtml(d) {
   ].map(([title, events, note]) => `<div class="rounded-lg border border-line bg-slate-50 p-4"><div class="flex items-center justify-between gap-3"><p class="text-sm font-bold text-ink">${title}</p><span class="rounded-full border border-line bg-white px-2 py-1 text-xs font-bold text-muted">${events.length}</span></div><p class="mt-2 text-xs leading-5 text-muted">${note}</p>${events.slice(0, 3).map(e => `<div class="mt-3 border-t border-line pt-3 text-xs leading-5 text-slate-700"><b>${esc(e.level)} · ${esc(e.asin)}</b><br>${esc(e.type)}：${esc(e.detail)}</div>`).join('') || '<div class="mt-3 border-t border-line pt-3 text-xs leading-5 text-muted">暂无</div>'}</div>`).join('');
   const watchCards = d.asin_snapshots.map(p => `<div class="asin-watch-card rounded-lg border border-line bg-white p-4"><div class="flex gap-3"><div class="inline-flex h-20 w-20 shrink-0 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div><div class="min-w-0"><p class="truncate text-sm font-bold text-ink"><a class="text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener">${esc(p.asin)}</a></p><p class="mt-1 text-xs text-muted">${roleLabel(p.role)} · ${esc(p.brand || '-')}</p><p class="asin-card-title mt-2 text-xs leading-5 text-muted">${esc(p.title || '未获取标题')}</p></div></div><div class="asin-card-metrics mt-4 grid gap-2 md:grid-cols-3">${metricCard('价格', fmtMoney(p.price))}${metricCard('BSR', fmtNum(p.bsr))}${metricCard('估算销量', fmtNum(p.monthly_sales))}${metricCard('评分', fmtRating(p.rating))}${metricCard('Review', fmtNum(p.review_count))}${metricCard('流量词', fmtNum(p.traffic_keywords_count))}</div><div class="mt-3 flex flex-wrap gap-2"><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">事件 ${d.events.filter(e => e.asin === p.asin).length}</span><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">风险 ${d.events.filter(e => e.asin === p.asin && e.level === 'high').length}</span></div></div>`).join('');
   const actionRows = d.action_items.map(a => `<tr><td>${esc(a.priority)}</td><td>${esc(a.reason.split('：')[0] || '复核')}</td><td>${esc(a.reason.match(/[A-Z0-9]{10}/)?.[0] || '-')}</td><td>${esc(a.reason)}</td><td>${esc(a.action)}</td></tr>`).join('');
-  const asinRows = d.asin_snapshots.map(p => `<tr><td><div class="inline-flex h-20 w-20 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div></td><td>${roleLabel(p.role)}</td><td><a class="font-medium text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener"><strong class="metric-emphasis">${esc(p.asin)}</strong></a></td><td>${esc(p.brand || '-')}</td><td><strong class="metric-emphasis">${fmtMoney(p.price)}</strong></td><td><strong class="metric-emphasis">${fmtMoney(couponAfterPrice(p))}</strong></td><td>${fmtNum(p.bsr)}</td><td><strong class="metric-emphasis">${fmtNum(p.monthly_sales)}</strong></td><td>${fmtRating(p.rating)}</td><td>${fmtNum(p.rating_count)}</td><td><strong class="metric-emphasis">${fmtNum(p.review_count)}</strong></td><td>${fmtNum(p.traffic_keywords_count)}</td><td>${fmtNum(p.ad_keywords_count)}</td><td>${fmtNum(p.seller_count)}</td><td>${p.has_aplus ? '有' : '无'}</td><td>${p.has_video ? '有' : '无'}</td><td>${esc(productTag(p))}</td></tr>`).join('');
+  const asinRows = d.asin_snapshots.map(p => `<tr><td><div class="inline-flex h-20 w-20 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div></td><td>${roleLabel(p.role)}</td><td><a class="font-medium text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener"><strong class="metric-emphasis">${esc(p.asin)}</strong></a></td><td>${esc(p.brand || '-')}</td><td><strong class="metric-emphasis">${fmtMoney(p.price)}</strong></td><td><strong class="metric-emphasis">${couponAfterDisplay(p)}</strong></td><td>${fmtNum(p.bsr)}</td><td><strong class="metric-emphasis">${fmtNum(p.monthly_sales)}</strong></td><td>${fmtRating(p.rating)}</td><td>${fmtNum(p.rating_count)}</td><td><strong class="metric-emphasis">${fmtNum(p.review_count)}</strong></td><td>${fmtNum(p.traffic_keywords_count)}</td><td>${fmtNum(p.ad_keywords_count)}</td><td>${fmtNum(p.seller_count)}</td><td>${p.has_aplus ? '有' : '无'}</td><td>${p.has_video ? '有' : '无'}</td><td>${esc(productTag(p))}</td></tr>`).join('');
   const compareRowsExact = d.asin_snapshots.filter(p => p.role !== 'own').map(p => `<tr><td><strong class="metric-emphasis">${esc(own.asin || '-')}</strong></td><td><strong class="metric-emphasis">${esc(p.asin)}</strong></td><td><strong class="metric-emphasis">${signedMoney((num(p.price) ?? 0) - (num(own.price) ?? 0))}</strong></td><td>${signedNum((num(p.monthly_sales) ?? 0) - (num(own.monthly_sales) ?? 0))}</td><td>${signedNum((num(p.bsr) ?? 0) - (num(own.bsr) ?? 0))}</td><td>${signedNum((num(p.rating) ?? 0) - (num(own.rating) ?? 0))}</td><td>${signedNum((num(p.traffic_keywords_count) ?? 0) - (num(own.traffic_keywords_count) ?? 0))}</td><td>${esc(productTag(p))}</td></tr>`).join('');
   const trendEventRows = d.events.map(e => `<tr><td>${esc(d.meta.report_date)}</td><td>${esc(e.level)}</td><td>${e.level === 'high' ? 'risk' : e.type.includes('机会') ? 'opportunity' : 'neutral'}</td><td>${roleLabel(d.asin_snapshots.find(p => p.asin === e.asin)?.role)}</td><td><strong class="metric-emphasis">${esc(e.asin)}</strong></td><td>${esc(e.type)}</td><td>${esc(e.detail)}</td></tr>`).join('');
   const reviewSampleRows = (d.review_voc || []).slice(0, 30).map(r => `<tr><td><strong class="metric-emphasis">${esc(r.asin)}</strong></td><td>${fmtRating(r.star)}</td><td>${esc(r.title || '-')}</td><td>${esc(r.body || '-')}</td><td>${r.vp ? 'VP' : '-'}</td></tr>`).join('');
@@ -1024,24 +1120,29 @@ function chartJs() { return `function draw(metric,id,title){const el=document.ge
 function exactCss() { return `:root{--bg:#f5f7fb;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--brand:#047857;--brand-soft:#ecfdf5;--panel:0 10px 28px rgba(15,23,42,.06)}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f5f7fb;color:var(--ink);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",Arial,sans-serif;font-variant-numeric:tabular-nums}.min-h-screen{min-height:100vh}.report-header{position:sticky;top:0;z-index:40;background:rgba(255,255,255,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}.mx-auto{margin-left:auto;margin-right:auto}.max-w-\\[1500px\\]{max-width:1500px}.grid{display:grid}.flex{display:flex}.hidden{display:none}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.gap-2{gap:8px}.gap-3{gap:12px}.gap-4{gap:16px}.gap-5{gap:20px}.space-y-3>*+*{margin-top:12px}.space-y-5>*+*{margin-top:20px}.min-w-0{min-width:0}.shrink-0{flex-shrink:0}.overflow-hidden{overflow:hidden}.overflow-auto{overflow:auto}.overflow-y-auto{overflow-y:auto}.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sticky{position:sticky}.top-0{top:0}.top-\\[76px\\]{top:76px}.max-h-\\[calc\\(100vh-96px\\)\\]{max-height:calc(100vh - 96px)}.px-2{padding-left:8px;padding-right:8px}.px-3{padding-left:12px;padding-right:12px}.px-4{padding-left:16px;padding-right:16px}.px-5{padding-left:20px;padding-right:20px}.py-1{padding-top:4px;padding-bottom:4px}.py-2{padding-top:8px;padding-bottom:8px}.py-3{padding-top:12px;padding-bottom:12px}.py-5{padding-top:20px;padding-bottom:20px}.p-2{padding:8px}.p-3{padding:12px}.p-4{padding:16px}.p-6{padding:24px}.p-7{padding:28px}.pt-3{padding-top:12px}.pb-2{padding-bottom:8px}.mt-1{margin-top:4px}.mt-2{margin-top:8px}.mt-3{margin-top:12px}.mt-4{margin-top:16px}.mt-5{margin-top:20px}.mt-6{margin-top:24px}.mb-1{margin-bottom:4px}.mb-3{margin-bottom:12px}.mb-4{margin-bottom:16px}.rounded-md{border-radius:6px}.rounded-lg{border-radius:8px}.rounded-full{border-radius:999px}.border{border:1px solid var(--line)}.border-t{border-top:1px solid var(--line)}.border-b{border-bottom:1px solid var(--line)}.border-line{border-color:var(--line)}.border-emerald-200{border-color:#a7f3d0}.border-slate-700{border-color:#334155}.bg-white{background:#fff}.bg-white\\/92{background:rgba(255,255,255,.92)}.bg-slate-50{background:#f8fafc}.bg-slate-900{background:#0f172a}.bg-ink{background:#0f172a}.bg-emerald-50{background:#ecfdf5}.text-white{color:#fff}.text-ink{color:var(--ink)}.text-muted{color:var(--muted)}.text-brand{color:var(--brand)}.text-emerald-700{color:#047857}.text-emerald-300{color:#6ee7b7}.text-slate-300{color:#cbd5e1}.text-slate-400{color:#94a3b8}.text-slate-700{color:#334155}.text-xs{font-size:12px}.text-sm{font-size:14px}.text-2xl{font-size:24px}.font-medium{font-weight:500}.font-semibold{font-weight:650}.font-bold{font-weight:750}.uppercase{text-transform:uppercase}.tracking-wide{letter-spacing:.04em}.leading-5{line-height:20px}.leading-6{line-height:24px}.shadow-panel{box-shadow:var(--panel)}.w-full{width:100%}.h-3\\.5{height:14px}.w-3\\.5{width:14px}.h-4{height:16px}.w-4{width:16px}.h-5{height:20px}.w-5{width:20px}.h-10{height:40px}.w-10{width:40px}.h-20{height:80px}.w-20{width:80px}.max-h-full{max-height:100%}.max-w-full{max-width:100%}.object-contain{object-fit:contain}.inline-flex{display:inline-flex}.hover\\:underline:hover{text-decoration:underline}.hover\\:bg-slate-50:hover{background:#f8fafc}.sticky-nav a{display:flex;align-items:center;gap:8px;border-radius:6px;padding:8px 12px;color:#334155;text-decoration:none;font-size:14px}.sticky-nav a[aria-current=true],.sticky-nav a:hover{background:#f8fafc;color:#0f172a}.report-layout{grid-template-columns:1fr}.hero-title{font-size:36px;line-height:1.14;font-weight:800;letter-spacing:0;margin:0}.hero-copy{font-size:15px}.metric-value{margin:0}.metric-number{font-size:28px;line-height:1.1;font-weight:800}.metric-unit{margin-left:4px;color:var(--muted);font-size:12px}.metric-emphasis{font-weight:800;color:#111827;white-space:nowrap}.asin-card-title{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.asin-card-metrics .rounded-md{min-height:72px}.report-table-block{overflow:auto;background:#fff}.top20-parameter-scroll,.interface-detail-scroll{max-height:520px;overflow:auto}.data-table{border-collapse:collapse;background:#fff}.data-table th,.data-table td{padding:11px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.data-table th{position:sticky;top:0;z-index:1;background:#f8fafc;color:#475569;font-size:12px;font-weight:800}.data-table td{font-size:13px}.chart{height:300px;min-height:300px}.interface-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.interface-audit-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}.text-muted{color:var(--muted)}a{color:inherit}code{display:inline-block;max-width:560px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:4px;background:#f1f5f9;padding:2px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}.report-watermark{display:none}@media(min-width:768px){.md\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.md\\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.md\\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.md\\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}.md\\:flex{display:flex}}@media(min-width:1024px){.lg\\:block{display:block}.lg\\:grid-cols-\\[280px_minmax\\(0\\,1fr\\)\\]{grid-template-columns:280px minmax(0,1fr)}}@media(min-width:1280px){.xl\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.xl\\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.xl\\:grid-cols-\\[1\\.1fr_0\\.9fr\\]{grid-template-columns:1.1fr .9fr}}@media(max-width:900px){.px-5{padding-left:12px;padding-right:12px}.p-7,.p-6{padding:16px}.hero-title{font-size:28px}.interface-metric-grid,.interface-audit-grid{grid-template-columns:1fr}.chart{height:260px}.hidden{display:none!important}}@media print{.no-print,aside,.report-header{display:none!important}.report-layout{display:block;padding:0}.shadow-panel{box-shadow:none}.chart{height:240px}.report-table-block,.interface-detail-scroll{max-height:none;overflow:visible}}`; }
 
 function exactChartJs() { return `(() => {
-const d=window.REPORT_DATA||{};const ps=d.asin_snapshots||[];const trends=d.trends||[];const events=d.events||[];const audit=d.request_audit||[];
-const money=v=>v==null?0:Number(v)||0;const label=p=>p.asin;const couponAfter=p=>{const price=money(p.price);const text=String(p.coupon||'');const pct=text.match(/(\\d+(?:\\.\\d+)?)\\s*%/);if(pct)return +(price*(1-Number(pct[1])/100)).toFixed(2);const off=text.match(/\\$?\\s*(\\d+(?:\\.\\d+)?)/);if(off&&/off|coupon|\\$/i.test(text))return Math.max(0,+(price-Number(off[1])).toFixed(2));return price};const asset=p=>(p.has_aplus?35:0)+(p.has_video?25:0)+Math.min(40,(Number(p.variation_count)||0)*4);
+const d=window.REPORT_DATA||{};const ps=d.asin_snapshots||[];const trends=d.trends||[];const events=d.events||[];const audit=d.request_audit||[];const reviews=d.review_voc||[];
+const money=v=>v==null?0:Number(v)||0;const label=p=>(p.role==='own'?'自有 ':'竞品 ')+p.asin+(p.brand?' · '+p.brand:'');
+const couponAfter=p=>p.coupon_after_price!=null?money(p.coupon_after_price):money(p.price);
+const asset=p=>(p.has_aplus?35:0)+(p.has_video?25:0)+Math.min(40,(Number(p.variation_count)||0)*4);
 function chart(id,opt){const el=document.getElementById(id);if(!el||!window.echarts)return;echarts.init(el).setOption(opt);}
-function hbar(id,title,values){chart(id,{title:{text:title,textStyle:{fontSize:13}},tooltip:{trigger:'axis'},grid:{left:96,right:18,top:44,bottom:24},xAxis:{type:'value'},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:86,overflow:'truncate'}},series:[{type:'bar',data:values,itemStyle:{color:'#047857'}}]});}
-hbar('priceBandCompareChart','价格带对比',ps.map(p=>money(p.price)));
-hbar('salesVolumeCompareChart','估算月销量对比',ps.map(p=>money(p.monthly_sales)));
-hbar('bsrSnapshotCompareChart','BSR 截面对比',ps.map(p=>money(p.bsr)));
-hbar('couponDiscountCompareChart','Coupon 力度对比',ps.map(p=>{const price=money(p.price);return price?+((price-couponAfter(p))/price*100).toFixed(1):0}));
-hbar('keywordSovApproxChart','核心词 SOV 近似',ps.map(p=>money(p.organic_keywords_count)+money(p.ad_keywords_count)));
-chart('listingAssetCoverageChart',{title:{text:'Listing 资产覆盖',textStyle:{fontSize:13}},tooltip:{},grid:{left:45,right:12,top:44,bottom:54},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25}},yAxis:{type:'value',max:100},series:[{type:'bar',data:ps.map(asset),itemStyle:{color:'#0f766e'}}]});
-chart('buyboxSellerCompareChart',{title:{text:'Buybox / 卖家数对比',textStyle:{fontSize:13}},tooltip:{},grid:{left:45,right:12,top:44,bottom:54},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25}},yAxis:{type:'value'},series:[{type:'bar',data:ps.map(p=>money(p.seller_count)),itemStyle:{color:'#2563eb'}}]});
-chart('ratingReviewMoatChart',{title:{text:'口碑壁垒散点',textStyle:{fontSize:13}},tooltip:{},grid:{left:45,right:20,top:44,bottom:40},xAxis:{name:'Review',type:'value'},yAxis:{name:'评分',type:'value',min:0,max:5},series:[{type:'scatter',symbolSize:v=>Math.max(8,Math.min(42,Math.sqrt(v[2]||1))),data:ps.map(p=>[money(p.review_count),money(p.rating),money(p.review_count),p.asin]),itemStyle:{color:'#7c3aed'}}]});
-function line(id,title,metric,reverse=false){const rows=trends.filter(t=>t.metric===metric);const dates=[...new Set(rows.map(r=>r.date))];const asins=[...new Set(rows.map(r=>r.asin))];chart(id,{title:{text:title,textStyle:{fontSize:13}},tooltip:{trigger:'axis'},legend:{top:24,type:'scroll'},grid:{left:52,right:18,top:70,bottom:34},xAxis:{type:'category',data:dates},yAxis:{type:'value',inverse:reverse},series:asins.map(a=>({name:a,type:'line',smooth:true,data:dates.map(dt=>{const r=rows.find(x=>x.asin===a&&x.date===dt);return r?r.value:null})}))});}
-line('priceTrendChart','价格趋势','price');line('bsrTrendChart','BSR 趋势','bsr',true);line('salesTrendChart','估算日销量趋势','sales');line('ratingTrendChart','评分趋势','rating');line('reviewTrendChart','Review 数趋势','review');
-const eventCounts={risk:events.filter(e=>e.level==='high'||e.level==='medium').length,opportunity:events.filter(e=>/机会|关键词/.test(e.type||'')).length,record:events.length};chart('eventStructureChart',{title:{text:'今日事件结构',textStyle:{fontSize:13}},tooltip:{},series:[{type:'pie',radius:['42%','70%'],data:[{name:'风险',value:eventCounts.risk},{name:'机会',value:eventCounts.opportunity},{name:'记录',value:eventCounts.record}]}]});
-chart('keywordCoverageCompareChart',{title:{text:'关键词覆盖对比',textStyle:{fontSize:13}},tooltip:{trigger:'axis'},legend:{top:24},grid:{left:45,right:12,top:70,bottom:54},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25}},yAxis:{type:'value'},series:[{name:'自然词',type:'bar',data:ps.map(p=>money(p.organic_keywords_count))},{name:'广告词',type:'bar',data:ps.map(p=>money(p.ad_keywords_count))}]});
-chart('keywordOpportunityMatrixChart',{title:{text:'关键词机会矩阵',textStyle:{fontSize:13}},tooltip:{},grid:{left:45,right:20,top:44,bottom:40},xAxis:{name:'搜索量',type:'value'},yAxis:{name:'自然位',type:'value',inverse:true},series:[{type:'scatter',data:(d.keyword_gap||[]).map(k=>[money(k.search_volume),money(k.organic_rank)||100,k.keyword]),itemStyle:{color:'#dc2626'}}]});
-const toolCounts={};audit.forEach(a=>{let n=a.interface||'unknown';if(/ProductRequest/i.test(n))n='asin_detail';else if(/AsinSalesVolume/i.test(n))n='asin_sales';else if(/ASINRequestKeyword/i.test(n))n='asin_keywords';else if(/ASINKeywordRanking/i.test(n))n='asin_kw_rank';else if(/KeywordExtends/i.test(n))n='keyword_extend';else if(/Keyword/i.test(n))n='keyword_detail';else if(/Review/i.test(n))n='reviews';toolCounts[n]=(toolCounts[n]||0)+1});chart('interfaceAuditChart',{tooltip:{},grid:{left:120,right:20,top:20,bottom:24},xAxis:{type:'value'},yAxis:{type:'category',data:Object.keys(toolCounts)},series:[{type:'bar',data:Object.values(toolCounts),itemStyle:{color:'#047857'}}]});
+function hbar(id,name,values,unit=''){chart(id,{tooltip:{trigger:'axis',valueFormatter:v=>unit?String(v)+unit:v},legend:{top:0},grid:{left:132,right:18,top:34,bottom:22},xAxis:{type:'value'},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:[{name,type:'bar',data:values,itemStyle:{color:'#047857'}}]});}
+hbar('priceBandCompareChart','当前价格/券后价',ps.map(p=>couponAfter(p)),'$');
+hbar('salesVolumeCompareChart','估算月销量',ps.map(p=>money(p.monthly_sales)),'件');
+hbar('bsrSnapshotCompareChart','小类 BSR',ps.map(p=>money(p.bsr)),'位');
+hbar('couponDiscountCompareChart','到手价折扣',ps.map(p=>{const price=money(p.price);return price?+((price-couponAfter(p))/price*100).toFixed(1):0}),'%');
+chart('listingAssetCoverageChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:45,right:12,top:44,bottom:58},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25,width:82,overflow:'truncate'}},yAxis:{type:'value',max:100},series:[{name:'Listing资产分',type:'bar',data:ps.map(asset),itemStyle:{color:'#0f766e'}}]});
+chart('buyboxSellerCompareChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:45,right:12,top:44,bottom:58},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25,width:82,overflow:'truncate'}},yAxis:{type:'value'},series:[{name:'卖家数',type:'bar',data:ps.map(p=>money(p.seller_count)),itemStyle:{color:'#2563eb'}}]});
+chart('ratingReviewMoatChart',{tooltip:{formatter:p=>{const v=p.value;return v[3]+'<br/>Review 数：'+v[0]+'<br/>评分：'+v[1]}},legend:{top:0},grid:{left:58,right:24,top:42,bottom:42},xAxis:{name:'Review 数',type:'value'},yAxis:{name:'评分',type:'value',min:0,max:5},series:[{name:'ASIN：Review 数 × 评分',type:'scatter',symbolSize:v=>Math.max(10,Math.min(42,Math.sqrt(v[2]||1))),label:{show:true,formatter:p=>p.value[3],position:'right',fontSize:10},data:ps.map(p=>[money(p.review_count),money(p.rating),money(p.review_count),p.asin]),itemStyle:{color:'#7c3aed'}}]});
+function line(id,metric,reverse=false){const rows=trends.filter(t=>t.metric===metric);const dates=[...new Set(rows.map(r=>r.date))];const asins=[...new Set(rows.map(r=>r.asin))];chart(id,{tooltip:{trigger:'axis'},legend:{top:0,type:'scroll'},grid:{left:52,right:18,top:52,bottom:34},xAxis:{type:'category',data:dates},yAxis:{type:'value',inverse:reverse},series:asins.map(a=>({name:a,type:'line',smooth:true,data:dates.map(dt=>{const r=rows.find(x=>x.asin===a&&x.date===dt);return r?r.value:null})}))});}
+line('priceTrendChart','price');line('bsrTrendChart','bsr',true);line('salesTrendChart','sales_daily');line('ratingTrendChart','rating');line('reviewTrendChart','review');
+const eventCounts={risk:events.filter(e=>e.level==='high'||e.level==='medium').length,opportunity:events.filter(e=>/机会|关键词/.test(e.type||'')).length,record:events.length};chart('eventStructureChart',{tooltip:{},legend:{bottom:0},series:[{name:'事件数',type:'pie',radius:['42%','70%'],data:[{name:'风险',value:eventCounts.risk},{name:'机会',value:eventCounts.opportunity},{name:'记录',value:eventCounts.record}]}]});
+chart('keywordCoverageCompareChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:45,right:12,top:44,bottom:58},xAxis:{type:'category',data:ps.map(label),axisLabel:{rotate:25,width:82,overflow:'truncate'}},yAxis:{type:'value'},series:[{name:'自然词',type:'bar',data:ps.map(p=>money(p.organic_keywords_count))},{name:'广告词',type:'bar',data:ps.map(p=>money(p.ad_keywords_count))}]});
+chart('keywordOpportunityMatrixChart',{tooltip:{formatter:p=>p.value[2]+'<br/>搜索量：'+p.value[0]+'<br/>自然位：'+p.value[1]},legend:{top:0},grid:{left:58,right:90,top:42,bottom:42},xAxis:{name:'搜索量',type:'value'},yAxis:{name:'自然位',type:'value',inverse:true},series:[{name:'核心词',type:'scatter',label:{show:true,formatter:p=>p.value[2],position:'right',fontSize:10},data:(d.keyword_gap||[]).filter(k=>k.asin===(d.input?.own_asins||[])[0]).map(k=>[money(k.search_volume),money(k.organic_rank)||100,k.keyword]),itemStyle:{color:'#dc2626'}}]});
+const sovSeries=[{name:'自然词占比',field:'organic_keywords_count',color:'#047857'},{name:'广告词占比',field:'ad_keywords_count',color:'#2563eb'}].map(s=>({name:s.name,type:'bar',stack:'sov',data:ps.map(p=>{const total=money(p.organic_keywords_count)+money(p.ad_keywords_count);return total?+(money(p[s.field])/total*100).toFixed(1):0}),itemStyle:{color:s.color}}));
+chart('keywordSovApproxChart',{tooltip:{trigger:'axis',valueFormatter:v=>v+'%'},legend:{top:0},grid:{left:132,right:18,top:44,bottom:22},xAxis:{type:'value',max:100},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:sovSeries});
+const byAsin={};reviews.forEach(r=>{byAsin[r.asin]=byAsin[r.asin]||[0,0,0,0,0];const s=Math.max(1,Math.min(5,Math.round(money(r.star))));byAsin[r.asin][s-1]++});chart('ratingDistributionChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:132,right:18,top:44,bottom:22},xAxis:{type:'value',max:100},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:[1,2,3,4,5].map(star=>({name:star+'星',type:'bar',stack:'rating',data:ps.map(p=>{const arr=byAsin[p.asin]||[0,0,0,0,0];const total=arr.reduce((a,b)=>a+b,0);return total?+(arr[star-1]/total*100).toFixed(1):0})}))});
+const allText=reviews.map(r=>(r.title+' '+r.body).toLowerCase()).join(' ');const topics=[['快充体验',['fast','quick','charging','charge']],['旅行便携',['travel','compact','slim','portable']],['发热担忧',['heat','hot','warm']],['线材耐久',['cable','cord','wire']],['容量感知',['capacity','battery','mah']]];chart('reviewTopicMentionChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:92,right:18,top:34,bottom:22},xAxis:{type:'value'},yAxis:{type:'category',data:topics.map(t=>t[0])},series:[{name:'提及次数',type:'bar',data:topics.map(t=>t[1].reduce((sum,w)=>sum+(allText.match(new RegExp('\\\\b'+w+'\\\\b','g'))||[]).length,0)),itemStyle:{color:'#0f766e'}}]});
+const toolCounts={};audit.forEach(a=>{let n=a.interface||'unknown';if(/ProductRequest/i.test(n))n='asin_detail';else if(/AsinSalesVolume/i.test(n))n='asin_sales';else if(/ASINRequestKeyword/i.test(n))n='asin_keywords';else if(/ASINKeywordRanking/i.test(n))n='asin_kw_rank';else if(/KeywordExtends/i.test(n))n='keyword_extend';else if(/Keyword/i.test(n))n='keyword_detail';else if(/Review/i.test(n))n='reviews';toolCounts[n]=(toolCounts[n]||0)+1});chart('interfaceAuditChart',{tooltip:{},legend:{top:0},grid:{left:120,right:20,top:34,bottom:24},xAxis:{type:'value'},yAxis:{type:'category',data:Object.keys(toolCounts)},series:[{name:'调用次数',type:'bar',data:Object.values(toolCounts),itemStyle:{color:'#047857'}}]});
 })();`; }
 
 app.post('/api/run', async (req, res) => {
