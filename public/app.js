@@ -9,18 +9,21 @@ function setStatus(type, text) {
   statusEl.className = `status ${type}`;
   statusEl.textContent = text;
 }
+
 function formDataJson(form) {
   const fd = new FormData(form);
   const obj = Object.fromEntries(fd.entries());
   obj.demoMode = fd.get('demoMode') === 'on';
   return obj;
 }
+
 function fmtMs(ms) {
   if (!Number.isFinite(Number(ms))) return '-';
   const sec = Math.round(Number(ms) / 1000);
   if (sec < 60) return `${sec}s`;
   return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
+
 function renderSummary(s) {
   summaryEl.classList.remove('hidden');
   summaryEl.innerHTML = `
@@ -31,17 +34,23 @@ function renderSummary(s) {
     <div><b>${s.total_request_consumed ?? '-'}</b><span>消耗次数</span></div>
     <div><b>${fmtMs(s.total_duration_ms)}</b><span>CLI 总运行时间</span></div>`;
 }
+
 function renderLinks(urls) {
+  const items = [
+    ['打开 HTML 看板', urls.html, 'primary', false],
+    ['下载 PDF', urls.pdf, '', false],
+    ['下载 Markdown', urls.markdown, '', true],
+    ['下载 JSON', urls.json, '', true],
+    ['下载 CSV', urls.csv, '', true],
+    ['下载全部 ZIP', urls.zip, '', true]
+  ].filter(([, url]) => url);
   linksEl.classList.remove('hidden');
-  linksEl.innerHTML = `
-    <a class="primary" href="${urls.html}" target="_blank">打开 HTML 看板</a>
-    <a href="${urls.pdf}">下载 PDF</a>
-    <a href="${urls.markdown}">下载 Markdown</a>
-    <a href="${urls.json}">下载 JSON</a>
-    <a href="${urls.csv}">下载 CSV</a>
-    <a href="${urls.zip}">下载全部 ZIP</a>`;
-  preview.src = urls.html;
+  linksEl.innerHTML = items.map(([label, url, cls, download]) =>
+    `<a class="${cls}" href="${url}" ${download ? 'download' : 'target="_blank" rel="noopener"'}>${label}</a>`
+  ).join('');
+  if (urls.html) preview.src = urls.html;
 }
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   btn.disabled = true;
