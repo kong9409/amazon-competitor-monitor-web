@@ -308,15 +308,26 @@ function productReviewCount(obj) {
   return ratings !== null && ratings > 5 ? ratings : null;
 }
 
-const MONTHLY_SALES_FIELDS = [
-  'ListingSalesVolumeOfMonth', 'listingSalesVolumeOfMonth',
-  'ListingSalesVolumeOfMonthTrend', 'listingSalesVolumeOfMonthTrend',
-  'ListingSalesVolume', 'listingSalesVolume',
-  'monthlySales', 'MonthlySales', 'monthSales', 'MonthSales',
-  'estimatedMonthlySales', 'EstimatedMonthlySales',
-  'salesVolumeOfMonth', 'SalesVolumeOfMonth', 'salesVolume30', 'SalesVolume30',
-  'AsinSalesCount'
+const MONTHLY_SALES_FIELD_CONFIG = [
+  { field: 'ListingSalesVolumeOfMonth', priority: 1, kind: '链接月销量' },
+  { field: 'listingSalesVolumeOfMonth', priority: 1, kind: '链接月销量' },
+  { field: 'ListingSalesVolume', priority: 2, kind: '链接销量别名' },
+  { field: 'listingSalesVolume', priority: 2, kind: '链接销量别名' },
+  { field: 'monthlySales', priority: 2, kind: '链接销量别名' },
+  { field: 'MonthlySales', priority: 2, kind: '链接销量别名' },
+  { field: 'monthSales', priority: 2, kind: '链接销量别名' },
+  { field: 'MonthSales', priority: 2, kind: '链接销量别名' },
+  { field: 'estimatedMonthlySales', priority: 2, kind: '链接销量别名' },
+  { field: 'EstimatedMonthlySales', priority: 2, kind: '链接销量别名' },
+  { field: 'salesVolumeOfMonth', priority: 2, kind: '链接销量别名' },
+  { field: 'SalesVolumeOfMonth', priority: 2, kind: '链接销量别名' },
+  { field: 'salesVolume30', priority: 2, kind: '链接销量别名' },
+  { field: 'SalesVolume30', priority: 2, kind: '链接销量别名' },
+  { field: 'ListingSalesVolumeOfMonthTrend', priority: 3, kind: '月销量趋势兜底' },
+  { field: 'listingSalesVolumeOfMonthTrend', priority: 3, kind: '月销量趋势兜底' },
+  { field: 'AsinSalesCount', priority: 5, kind: 'ASIN销量计数字段兜底' }
 ];
+const MONTHLY_SALES_FIELDS = MONTHLY_SALES_FIELD_CONFIG.map(x => x.field);
 
 function latestMonthlySales(raw) {
   const direct = responseMetric(raw, MONTHLY_SALES_FIELDS);
@@ -333,20 +344,26 @@ function latestMonthlySales(raw) {
 function monthlySalesCandidates(product, salesRaw) {
   const rows = [];
   const seen = new Set();
-  const add = (source, field, value) => {
+  const add = (source, field, value, config = {}) => {
     const n = Array.isArray(value) ? latestMonthlySales({ data: value }) : num(value);
     if (n === null) return;
     const key = `${source}:${field}:${n}`;
     if (seen.has(key)) return;
     seen.add(key);
-    rows.push({ source, field, value: n });
+    rows.push({
+      source,
+      field,
+      value: n,
+      priority: config.priority ?? 9,
+      kind: config.kind || (source === 'AsinSalesVolume' ? '父体/子体销量兜底' : '未知月销候选')
+    });
   };
-  for (const field of MONTHLY_SALES_FIELDS) {
-    add('ProductRequest', field, findVal(product, [field]) ?? findAny(product, [field], { scalarOnly: false }));
+  for (const config of MONTHLY_SALES_FIELD_CONFIG) {
+    add('ProductRequest', config.field, findVal(product, [config.field]) ?? findAny(product, [config.field], { scalarOnly: false }), config);
   }
   const salesMetric = latestMonthlySales(salesRaw);
-  if (salesMetric !== null) add('AsinSalesVolume', 'latest_sales_array_or_metric', salesMetric);
-  return rows;
+  if (salesMetric !== null) add('AsinSalesVolume', 'latest_sales_array_or_metric', salesMetric, { priority: 9, kind: '父体/子体销量兜底' });
+  return rows.sort((a, b) => a.priority - b.priority || b.value - a.value || a.field.localeCompare(b.field));
 }
 
 function parentAsinFromRaw(raw, asin) {
@@ -461,10 +478,7 @@ function normalizeProduct(asin, role, raw, salesRaw = {}) {
   const coupon = promotionText(product);
   const couponAfter = promotionPrice(product);
   const salesCandidates = monthlySalesCandidates(product, salesRaw);
-  const listingMonthlySales = salesCandidates.find(x => x.source === 'ProductRequest' && x.field.toLowerCase() === 'listingsalesvolumeofmonth' && x.value > 0)
-    || salesCandidates.find(x => x.source === 'ProductRequest' && x.value > 0);
-  const childSales = salesCandidates.find(x => x.source === 'AsinSalesVolume' && x.value > 0);
-  const monthlySalesCandidate = listingMonthlySales || childSales || salesCandidates[0];
+  const monthlySalesCandidate = salesCandidates.find(x => x.value > 0) || salesCandidates[0];
   const monthlySales = monthlySalesCandidate?.value ?? null;
   const revenue = findVal(product, ['listingSalesOfMonth', 'ListingSalesOfMonth', 'revenue', 'salesAmount', 'monthlyRevenue']);
   const brand = findVal(product, ['brand', 'Brand', 'brandName']);
@@ -491,6 +505,7 @@ function normalizeProduct(asin, role, raw, salesRaw = {}) {
     coupon: couponText(coupon),
     monthly_sales: num(monthlySales),
     monthly_sales_source: monthlySalesCandidate ? `${monthlySalesCandidate.source}.${monthlySalesCandidate.field}` : '',
+    monthly_sales_source_note: monthlySalesCandidate?.kind || '',
     monthly_sales_candidates: salesCandidates,
     revenue: num(revenue),
     image: cleanText(image, 500),
@@ -1129,35 +1144,40 @@ function reviewDistributionRows(d) {
 function reviewTopicStats(source) {
   const reviews = Array.isArray(source) ? source : (source.review_voc || []);
   const themes = [
-    { topic: '外观颜值/设计质感', words: ['beautiful', 'look', 'looks', 'design', 'modern', 'elegant', 'style', 'brushed', 'gold', 'black', '外观', '颜值', '设计'] },
-    { topic: '质量做工/材料扎实', words: ['quality', 'solid', 'sturdy', 'heavy', 'hardware', 'tempered', 'durable', '质量', '做工', '材质'] },
-    { topic: '安装体验/说明清晰', words: ['install', 'installation', 'installed', 'instructions', 'straightforward', 'easy', '安装', '说明'] },
-    { topic: '性价比/价格满意', words: ['price', 'value', 'worth', 'affordable', 'deal', '性价比', '价格'] },
-    { topic: '包装物流/到货状态', words: ['packaged', 'package', 'shipping', 'arrived', 'delivered', '物流', '包装'] },
-    { topic: '开合顺滑/使用体验', words: ['smooth', 'slide', 'sliding', 'soft-close', 'works', 'function', '使用', '顺滑'] },
-    { topic: '安装困难/耗时', words: ['difficult', 'hard', 'challenge', 'precision', 'complicated', 'unclear', '困难', '复杂'] },
-    { topic: '破损/缺件/配件问题', words: ['broken', 'damaged', 'missing', 'replacement', 'parts', '缺件', '破损', '配件'] },
-    { topic: '漏水/挡水问题', words: ['water', 'leak', 'leaking', 'splash', 'seal', 'strip', '漏水', '挡水'] },
-    { topic: '尺寸匹配/调节问题', words: ['size', 'fit', 'measure', 'adjustable', 'opening', '尺寸', '匹配'] }
+    { topic: '外观颜值/设计质感', good: ['beautiful', 'looks good', 'modern look', 'elegant', 'style', 'brushed', 'gold', 'black', '外观好', '颜值', '设计感'], bad: ['poor look', 'ugly', 'scratch', 'scratched', 'finish issue', '外观差', '划痕'] },
+    { topic: '质量做工/材料扎实', good: ['good quality', 'great quality', 'solid', 'sturdy', 'heavy', 'hardware', 'tempered', 'durable', '质量好', '做工好', '材质扎实'], bad: ['poor quality', 'less than one star', 'cheap', 'flimsy', 'bad quality', '质量差', '做工差', '材质差'] },
+    { topic: '安装体验/说明清晰', good: ['easy to install', 'straight forward', 'straightforward', 'instructions were clear', 'clear instructions', 'install was', '安装简单', '说明清晰'], bad: ['hard to install', 'difficult to install', 'installation took', 'unclear instructions', 'no instructions', '安装困难', '说明不清'] },
+    { topic: '性价比/价格满意', good: ['great value', 'good value', 'for the price', 'worth', 'affordable', 'deal', '性价比高', '价格满意'], bad: ['overpriced', 'not worth', 'expensive', 'too much', '性价比低', '价格贵'] },
+    { topic: '包装物流/到货状态', good: ['packaged very well', 'well packaged', 'arrived intact', 'delivered on time', '包装好', '到货完好'], bad: ['damaged package', 'shipping damage', 'arrived broken', 'late delivery', '包装破损', '物流破损'] },
+    { topic: '售后响应/厂家支持', good: ['responsive', 'great service', 'customer service helped', 'manufacturer responded', '售后响应', '客服好'], bad: ['no response', 'no response from manufacturer', 'manufacturer did not respond', 'customer service never', '售后无响应', '厂家不回复'] },
+    { topic: '开合顺滑/使用体验', good: ['smooth', 'slides well', 'slide well', 'soft-close', 'works great', 'works well', 'function surprisingly well', '使用顺滑', '开合顺滑'], bad: ['moving parts failure', 'does not slide', 'stuck', 'not smooth', 'functionality', '使用卡顿', '开合不顺'] },
+    { topic: '安装困难/耗时', bad: ['difficult', 'hard', 'challenge', 'precision', 'complicated', 'unclear', 'not easy to install', '安装困难', '复杂', '耗时'] },
+    { topic: '破损/缺件/配件问题', bad: ['broken', 'damaged', 'missing', 'replacement', 'parts failure', '缺件', '破损', '配件'] },
+    { topic: '漏水/挡水问题', bad: ['water splashing', 'water leaking', 'leak', 'leaking', 'not fully sealed', 'seal', 'strip', '漏水', '挡水'] },
+    { topic: '尺寸匹配/调节问题', good: ['fit perfectly', 'fits well', 'adjustable', '尺寸合适', '匹配'], bad: ['does not fit', 'wrong size', 'measure twice', 'opening issue', '尺寸不符', '匹配问题'] }
   ];
+  const hasAny = (text, words = []) => words.some(w => text.includes(w));
   const stats = new Map();
+  const add = (direction, topic, review) => {
+    const key = `${direction}:${topic}`;
+    const row = stats.get(key) || { topic, count: 0, direction, example: '' };
+    row.count += 1;
+    if (!row.example) row.example = cleanText(review.title || review.body || '', 160);
+    stats.set(key, row);
+  };
   for (const review of reviews) {
     const text = cleanText(`${review.title || ''} ${review.body || ''}`, 1600).toLowerCase();
-    const star = num(review.star);
-    const direction = star !== null && star < 4 ? '差评' : '好评';
     for (const theme of themes) {
-      if (!theme.words.some(w => text.includes(w))) continue;
-      const key = `${direction}:${theme.topic}`;
-      const row = stats.get(key) || { topic: theme.topic, count: 0, direction, example: '' };
-      row.count += 1;
-      if (!row.example) row.example = cleanText(review.title || review.body || '', 120);
-      stats.set(key, row);
+      const positiveHit = hasAny(text, theme.good);
+      const negativeHit = hasAny(text, theme.bad);
+      if (positiveHit) add('好评', theme.topic, review);
+      if (negativeHit) add('差评', theme.topic, review);
     }
   }
   return [...stats.values()]
     .filter(r => r.count > 0)
-    .sort((a, b) => (a.direction === b.direction ? 0 : a.direction === '差评' ? -1 : 1) || b.count - a.count || a.topic.localeCompare(b.topic))
-    .slice(0, 10);
+    .sort((a, b) => b.count - a.count || (a.direction === b.direction ? 0 : a.direction === '差评' ? -1 : 1) || a.topic.localeCompare(b.topic))
+    .slice(0, 12);
 }
 
 function vocTopicRows(d) {
@@ -1230,7 +1250,7 @@ function renderExactHtml(d) {
     ['Listing 调整', d.events.filter(e => /Listing|图片|标题|视频|A\+/.test(e.type + e.detail)), '标题、五点、图片、变体或内容资产发生变化。'],
     ['关键词覆盖', d.events.filter(e => /关键词/.test(e.type + e.detail)), '流量词数量或结构发生变化。']
   ].map(([title, events, note]) => `<div class="rounded-lg border border-line bg-slate-50 p-4"><div class="flex items-center justify-between gap-3"><p class="text-sm font-bold text-ink">${title}</p><span class="rounded-full border border-line bg-white px-2 py-1 text-xs font-bold text-muted">${events.length}</span></div><p class="mt-2 text-xs leading-5 text-muted">${note}</p>${events.slice(0, 3).map(e => `<div class="mt-3 border-t border-line pt-3 text-xs leading-5 text-slate-700"><b>${esc(e.level)} · ${esc(e.asin)}</b><br>${esc(e.type)}：${esc(e.detail)}</div>`).join('') || '<div class="mt-3 border-t border-line pt-3 text-xs leading-5 text-muted">暂无</div>'}</div>`).join('');
-  const watchCards = d.asin_snapshots.map(p => `<div class="asin-watch-card rounded-lg border border-line bg-white p-4"><div class="flex gap-3"><div class="inline-flex h-20 w-20 shrink-0 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div><div class="min-w-0"><p class="truncate text-sm font-bold text-ink"><a class="text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener">${esc(p.asin)}</a></p><p class="mt-1 text-xs text-muted">${roleLabel(p.role)} · ${esc(p.brand || '-')}</p><p class="asin-card-title mt-2 text-xs leading-5 text-muted">${esc(p.title || '未获取标题')}</p></div></div><div class="asin-card-metrics mt-4 grid gap-2 md:grid-cols-3">${metricCard('价格', fmtMoney(p.price))}${metricCard('BSR', fmtNum(p.bsr))}${metricCard('估算销量', fmtNum(p.monthly_sales))}${metricCard('评分', fmtRating(p.rating))}${metricCard('Review', fmtNum(p.review_count))}${metricCard('流量词', fmtNum(p.traffic_keywords_count))}</div><div class="mt-3 flex flex-wrap gap-2"><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">事件 ${d.events.filter(e => e.asin === p.asin).length}</span><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">风险 ${d.events.filter(e => e.asin === p.asin && e.level === 'high').length}</span></div></div>`).join('');
+  const watchCards = d.asin_snapshots.map(p => `<div class="asin-watch-card rounded-lg border border-line bg-white p-4"><div class="flex gap-3"><div class="inline-flex h-20 w-20 shrink-0 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div><div class="min-w-0"><p class="truncate text-sm font-bold text-ink"><a class="text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener">${esc(p.asin)}</a></p><p class="mt-1 text-xs text-muted">${roleLabel(p.role)} · ${esc(p.brand || '-')}</p><p class="asin-card-title mt-2 text-xs leading-5 text-muted">${esc(p.title || '未获取标题')}</p></div></div><div class="asin-card-metrics mt-4 grid gap-2 md:grid-cols-3">${metricCard('价格', fmtMoney(p.price))}${metricCard('BSR', fmtNum(p.bsr))}${metricCard('估算销量', fmtNum(p.monthly_sales), p.monthly_sales_source_note || p.monthly_sales_source || '')}${metricCard('评分', fmtRating(p.rating))}${metricCard('Review', fmtNum(p.review_count))}${metricCard('流量词', fmtNum(p.traffic_keywords_count))}</div><div class="mt-3 flex flex-wrap gap-2"><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">事件 ${d.events.filter(e => e.asin === p.asin).length}</span><span class="rounded-full border border-line bg-slate-50 px-2 py-1 text-xs text-muted">风险 ${d.events.filter(e => e.asin === p.asin && e.level === 'high').length}</span></div></div>`).join('');
   const actionRows = d.action_items.map(a => `<tr><td>${esc(a.priority)}</td><td>${esc(a.reason.split('：')[0] || '复核')}</td><td>${esc(a.reason.match(/[A-Z0-9]{10}/)?.[0] || '-')}</td><td>${esc(a.reason)}</td><td>${esc(a.action)}</td></tr>`).join('');
   const asinRows = d.asin_snapshots.map(p => `<tr><td><div class="inline-flex h-20 w-20 items-center justify-center rounded-md border border-line bg-white p-2">${p.image ? `<img class="max-h-full max-w-full object-contain" src="${esc(p.image)}" alt="${esc(p.asin)}主图">` : '<span class="text-xs text-muted">无图</span>'}</div></td><td>${roleLabel(p.role)}</td><td><a class="font-medium text-brand hover:underline" href="${asinUrl(p.asin)}" target="_blank" rel="noopener"><strong class="metric-emphasis">${esc(p.asin)}</strong></a></td><td>${esc(p.brand || '-')}</td><td><strong class="metric-emphasis">${fmtMoney(p.price)}</strong></td><td><strong class="metric-emphasis">${couponAfterDisplay(p)}</strong></td><td>${fmtNum(p.bsr)}</td><td><strong class="metric-emphasis">${fmtNum(p.monthly_sales)}</strong></td><td>${fmtRating(p.rating)}</td><td>${fmtNum(p.rating_count)}</td><td><strong class="metric-emphasis">${fmtNum(p.review_count)}</strong></td><td>${fmtNum(p.traffic_keywords_count)}</td><td>${fmtNum(p.ad_keywords_count)}</td><td>${fmtNum(p.seller_count)}</td><td>${p.has_aplus ? '有' : '无'}</td><td>${p.has_video ? '有' : '无'}</td><td>${esc(productTag(p))}</td></tr>`).join('');
   const compareRowsExact = d.asin_snapshots.filter(p => p.role !== 'own').map(p => `<tr><td><strong class="metric-emphasis">${esc(own.asin || '-')}</strong></td><td><strong class="metric-emphasis">${esc(p.asin)}</strong></td><td><strong class="metric-emphasis">${signedMoney((num(p.price) ?? 0) - (num(own.price) ?? 0))}</strong></td><td>${signedNum((num(p.monthly_sales) ?? 0) - (num(own.monthly_sales) ?? 0))}</td><td>${signedNum((num(p.bsr) ?? 0) - (num(own.bsr) ?? 0))}</td><td>${signedNum((num(p.rating) ?? 0) - (num(own.rating) ?? 0))}</td><td>${signedNum((num(p.traffic_keywords_count) ?? 0) - (num(own.traffic_keywords_count) ?? 0))}</td><td>${esc(productTag(p))}</td></tr>`).join('');
