@@ -215,6 +215,11 @@ function firstProduct(raw, asin) {
   if (Array.isArray(data)) {
     return data.find(item => String(findVal(item, ['asin', 'Asin']) || '').toUpperCase() === target) || data[0] || {};
   }
+  if (data && typeof data === 'object') {
+    for (const [key, value] of Object.entries(data)) {
+      if (String(key).toUpperCase() === target && value && typeof value === 'object') return value;
+    }
+  }
   const stack = [data];
   const seen = new Set();
   while (stack.length) {
@@ -296,8 +301,11 @@ function productReviewCount(obj) {
 function latestMonthlySales(raw) {
   const direct = responseMetric(raw, [
     'ListingSalesVolumeOfMonth', 'listingSalesVolumeOfMonth',
+    'ListingSalesVolume', 'listingSalesVolume',
     'monthlySales', 'MonthlySales', 'monthSales', 'MonthSales',
-    'salesVolumeOfMonth', 'SalesVolumeOfMonth', 'AsinSalesCount'
+    'estimatedMonthlySales', 'EstimatedMonthlySales',
+    'salesVolumeOfMonth', 'SalesVolumeOfMonth', 'salesVolume30', 'SalesVolume30',
+    'AsinSalesCount'
   ]);
   if (direct !== null) return direct;
   const rows = firstArray(raw, ['data', 'Data', 'records', 'Records', 'sales', 'Sales', 'list', 'List']);
@@ -420,7 +428,15 @@ function normalizeProduct(asin, role, raw, salesRaw = {}) {
   const price = findVal(product, ['salesPrice', 'SalesPrice', 'price', 'Price', 'currentPrice', 'buyboxPrice', 'salePrice']);
   const coupon = promotionText(product);
   const couponAfter = promotionPrice(product);
-  const monthlySales = latestMonthlySales(salesRaw) ?? findVal(product, ['listingSalesVolumeOfMonth', 'ListingSalesVolumeOfMonth', 'AsinSalesCount', 'monthlySales', 'estimatedSales', 'monthSales']);
+  const listingMonthlySales = num(findVal(product, [
+    'listingSalesVolumeOfMonth', 'ListingSalesVolumeOfMonth',
+    'listingSalesVolume', 'ListingSalesVolume',
+    'monthlySales', 'MonthlySales', 'monthSales', 'MonthSales',
+    'estimatedMonthlySales', 'EstimatedMonthlySales',
+    'salesVolumeOfMonth', 'SalesVolumeOfMonth', 'salesVolume30', 'SalesVolume30'
+  ]));
+  const childSales = latestMonthlySales(salesRaw);
+  const monthlySales = listingMonthlySales && listingMonthlySales > 0 ? listingMonthlySales : childSales;
   const revenue = findVal(product, ['listingSalesOfMonth', 'ListingSalesOfMonth', 'revenue', 'salesAmount', 'monthlyRevenue']);
   const brand = findVal(product, ['brand', 'Brand', 'brandName']);
   const image = firstPhoto(product);
@@ -803,6 +819,7 @@ async function generateReport(input) {
     asin_snapshots: products,
     keyword_gap: keywordRows,
     keyword_metrics: keywordMetricRowsData,
+    review_topics: reviewTopicStats(reviews),
     review_voc: reviews,
     trends,
     events,
@@ -1010,19 +1027,41 @@ function reviewDistributionRows(d) {
   }).join('');
 }
 
+function reviewTopicStats(source) {
+  const reviews = Array.isArray(source) ? source : (source.review_voc || []);
+  const stopWords = new Set([
+    'about', 'after', 'again', 'also', 'amazon', 'because', 'been', 'being', 'between', 'came', 'could', 'door',
+    'doors', 'each', 'even', 'from', 'glass', 'good', 'great', 'have', 'having', 'just', 'like', 'look', 'made',
+    'make', 'many', 'more', 'much', 'need', 'nice', 'only', 'order', 'other', 'part', 'parts', 'product', 'really',
+    'same', 'shower', 'some', 'still', 'than', 'that', 'their', 'them', 'then', 'there', 'these', 'they', 'this',
+    'time', 'very', 'well', 'were', 'what', 'when', 'will', 'with', 'work', 'works', 'would', 'your'
+  ]);
+  const stats = new Map();
+  for (const review of reviews) {
+    const text = cleanText(`${review.title || ''} ${review.body || ''}`, 1600).toLowerCase();
+    const words = [...new Set(text.match(/[a-z][a-z'-]{3,}|[\u4e00-\u9fff]{2,}/g) || [])]
+      .map(w => w.replace(/^'+|'+$/g, ''))
+      .filter(w => w.length >= 4 && !stopWords.has(w));
+    const star = num(review.star);
+    const direction = star !== null && star < 4 ? '差评' : '好评';
+    for (const word of words) {
+      const row = stats.get(word) || { topic: word, count: 0, positive: 0, negative: 0 };
+      row.count += 1;
+      if (direction === '差评') row.negative += 1;
+      else row.positive += 1;
+      stats.set(word, row);
+    }
+  }
+  return [...stats.values()]
+    .filter(r => r.count > 0)
+    .sort((a, b) => b.count - a.count || b.negative - a.negative || a.topic.localeCompare(b.topic))
+    .slice(0, 8)
+    .map(r => ({ topic: r.topic, count: r.count, direction: r.negative > r.positive ? '差评' : '好评' }));
+}
+
 function vocTopicRows(d) {
-  const text = (d.review_voc || []).map(r => `${r.title} ${r.body}`).join(' ').toLowerCase();
-  const topics = [
-    ['快充体验', ['fast', 'quick', 'charging', 'charge'], '好评'],
-    ['旅行便携', ['travel', 'compact', 'slim', 'portable'], '好评'],
-    ['发热担忧', ['heat', 'hot', 'warm'], '差评'],
-    ['线材耐久', ['cable', 'cord', 'wire'], '差评'],
-    ['容量感知', ['capacity', 'battery', 'mah'], '差评']
-  ];
-  return topics.map(([name, words, direction]) => {
-    const count = words.reduce((sum, w) => sum + (text.match(new RegExp(`\\b${w}\\b`, 'g')) || []).length, 0);
-    return `<tr><td>${name}</td><td>${fmtNum(count)}</td><td>${direction}</td></tr>`;
-  }).join('');
+  const topics = (d.review_topics && d.review_topics.length ? d.review_topics : reviewTopicStats(d));
+  return topics.map(t => `<tr><td>${esc(t.topic)}</td><td>${fmtNum(t.count)}</td><td>${esc(t.direction)}</td></tr>`).join('');
 }
 
 function interfaceToolName(name) {
@@ -1059,7 +1098,7 @@ function tableBlock(headers, rows, minWidth = 1120) {
 }
 
 function metricCard(label, value, sub = '') {
-  return `<div class="rounded-lg border border-line bg-slate-50 p-4" style="min-width:0;overflow:hidden"><p class="text-xs font-semibold text-muted">${label}</p><p class="metric-value mt-2"><span class="metric-number" style="display:block;font-size:clamp(18px,2.2vw,28px);line-height:1.08;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">${value}</span></p><p class="mt-1 text-xs text-muted">${sub}</p></div>`;
+  return `<div class="rounded-lg border border-line bg-slate-50 p-4" style="min-width:0;overflow:visible"><p class="text-xs font-semibold text-muted">${label}</p><p class="metric-value mt-2"><span class="metric-number" style="display:block;font-size:clamp(13px,1.25vw,18px);line-height:1.15;white-space:normal;word-break:break-word;overflow:visible;text-overflow:clip;letter-spacing:0" title="${esc(value)}">${value}</span></p><p class="mt-1 text-xs text-muted">${sub}</p></div>`;
 }
 
 function sectionShell(id, kicker, title, desc, inner) {
@@ -1141,8 +1180,9 @@ chart('keywordOpportunityMatrixChart',{tooltip:{formatter:p=>p.value[2]+'<br/>�
 const sovSeries=[{name:'自然词占比',field:'organic_keywords_count',color:'#047857'},{name:'广告词占比',field:'ad_keywords_count',color:'#2563eb'}].map(s=>({name:s.name,type:'bar',stack:'sov',data:ps.map(p=>{const total=money(p.organic_keywords_count)+money(p.ad_keywords_count);return total?+(money(p[s.field])/total*100).toFixed(1):0}),itemStyle:{color:s.color}}));
 chart('keywordSovApproxChart',{tooltip:{trigger:'axis',valueFormatter:v=>v+'%'},legend:{top:0},grid:{left:132,right:18,top:44,bottom:22},xAxis:{type:'value',max:100},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:sovSeries});
 const byAsin={};reviews.forEach(r=>{byAsin[r.asin]=byAsin[r.asin]||[0,0,0,0,0];const s=Math.max(1,Math.min(5,Math.round(money(r.star))));byAsin[r.asin][s-1]++});chart('ratingDistributionChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:132,right:18,top:44,bottom:22},xAxis:{type:'value',max:100},yAxis:{type:'category',data:ps.map(label),axisLabel:{width:120,overflow:'truncate'}},series:[1,2,3,4,5].map(star=>({name:star+'星',type:'bar',stack:'rating',data:ps.map(p=>{const arr=byAsin[p.asin]||[0,0,0,0,0];const total=arr.reduce((a,b)=>a+b,0);return total?+(arr[star-1]/total*100).toFixed(1):0})}))});
-const allText=reviews.map(r=>(r.title+' '+r.body).toLowerCase()).join(' ');const topics=[['快充体验',['fast','quick','charging','charge']],['旅行便携',['travel','compact','slim','portable']],['发热担忧',['heat','hot','warm']],['线材耐久',['cable','cord','wire']],['容量感知',['capacity','battery','mah']]];chart('reviewTopicMentionChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:92,right:18,top:34,bottom:22},xAxis:{type:'value'},yAxis:{type:'category',data:topics.map(t=>t[0])},series:[{name:'提及次数',type:'bar',data:topics.map(t=>t[1].reduce((sum,w)=>sum+(allText.match(new RegExp('\\\\b'+w+'\\\\b','g'))||[]).length,0)),itemStyle:{color:'#0f766e'}}]});
+const reviewTopics=d.review_topics||[];chart('reviewTopicMentionChart',{tooltip:{trigger:'axis'},legend:{top:0},grid:{left:92,right:18,top:34,bottom:22},xAxis:{type:'value'},yAxis:{type:'category',data:reviewTopics.map(t=>t.topic),axisLabel:{width:82,overflow:'truncate'}},series:[{name:'提及次数',type:'bar',data:reviewTopics.map(t=>money(t.count)),itemStyle:{color:'#0f766e'}}]});
 const toolCounts={};audit.forEach(a=>{let n=a.interface||'unknown';if(/ProductRequest/i.test(n))n='asin_detail';else if(/AsinSalesVolume/i.test(n))n='asin_sales';else if(/ASINRequestKeyword/i.test(n))n='asin_keywords';else if(/ASINKeywordRanking/i.test(n))n='asin_kw_rank';else if(/KeywordExtends/i.test(n))n='keyword_extend';else if(/Keyword/i.test(n))n='keyword_detail';else if(/Review/i.test(n))n='reviews';toolCounts[n]=(toolCounts[n]||0)+1});chart('interfaceAuditChart',{tooltip:{},legend:{top:0},grid:{left:120,right:20,top:34,bottom:24},xAxis:{type:'value'},yAxis:{type:'category',data:Object.keys(toolCounts)},series:[{name:'调用次数',type:'bar',data:Object.values(toolCounts),itemStyle:{color:'#047857'}}]});
+const navLinks=[...document.querySelectorAll('.sticky-nav a[href^="#"]')];const sections=navLinks.map(a=>document.querySelector(a.getAttribute('href'))).filter(Boolean);function setCurrent(id){navLinks.forEach(a=>a.removeAttribute('aria-current'));const active=navLinks.find(a=>a.getAttribute('href')==='#'+id);if(active)active.setAttribute('aria-current','true');}if(sections.length&&'IntersectionObserver'in window){const obs=new IntersectionObserver(entries=>{const active=entries.filter(e=>e.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(active)setCurrent(active.target.id);},{rootMargin:'-18% 0px -68% 0px',threshold:[0,.1,.25,.5,.75]});sections.forEach(s=>obs.observe(s));}else{window.addEventListener('scroll',()=>{let current=sections[0];for(const section of sections){if(section.getBoundingClientRect().top<160)current=section;}if(current)setCurrent(current.id);},{passive:true});}
 })();`; }
 
 app.post('/api/run', async (req, res) => {
